@@ -20,12 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'up = control.up:main',
-            'up_forward = control.up_forward:main',
-            'up_forward_align = control.up_forward_align:main',
-            'test_align = control.test_align:main',
-            'upv12 = control.upv12:main',
-            'upv12noplot = control.upv12noplot:main',
+            'fly = control.latest_single_drop:main',
         ],
     },
 )
