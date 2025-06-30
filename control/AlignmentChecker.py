@@ -29,10 +29,10 @@ class AlignmentChecker:
         self.error_deque.append(error)
 
         # 只有当队列被填满时，才进行判断
-        if len(self.error_deque) == self.deque_maxlen:
+        if len(self.error_deque) == self.error_deque.maxlen:
             # 检查队列中的所有误差是否都小于阈值
             if all(e < self.threshold for e in self.error_deque):
-                self.logger_func(f"对准条件满足: 连续 {self.deque_maxlen} 次误差小于阈值 {self.threshold} m。")
+                self.logger_func(f"对准条件满足: 连续 {len(self.error_deque)} 次误差小于阈值 {self.threshold} m。")
                 return True  # 条件满足
 
         # 减少不必要的日志输出，可以只在接近对准或调试时打印

@@ -356,7 +356,7 @@ class OffboardControl(Node):
             self.target_position = None
             
             if self.first_alignment_complete and self.second_alignment_complete:
-                self.drop_payload()
+                self.drop_payload(-1.0,1.0)
                 self.droping_x = self.vehicle_local_position.x
                 self.droping_y = self.vehicle_local_position.y
                 self.droping_z = self.vehicle_local_position.z
@@ -364,11 +364,11 @@ class OffboardControl(Node):
                 
         else:
             if self.last_found_x_NED and self.last_found_y_NED and self.last_found_z_NED:
-                if self.log_counter % 3 == 0:
+                if self.log_counter % 10 == 0:
                     self.get_logger().info("使用上次记录")
                 self.fly_to_position(self.last_found_x_NED, self.last_found_y_NED, self.last_found_z_NED)
             else:
-                if self.log_counter % 3 == 0:
+                if self.log_counter % 10 == 0:
                     self.get_logger().info("上次记录不存在")
                 self.fly_to_position(self.DropArea_x, self.DropArea_y, self.takeoff_target_height)
 

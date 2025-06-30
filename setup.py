@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'fly = control.latest_single_drop:main',
+            'pub = control.sim_pub:main',
         ],
     },
 )
