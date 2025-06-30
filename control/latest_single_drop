@@ -10,6 +10,7 @@ from collections import deque
 import time
 from control.DronePositionChecker import DronePositionChecker
 from control.AlignmentChecker import AlignmentChecker
+from control.ServoControl import ServoControl
 # from control.visualize import Visualize
 # import RPi.GPIO as GPIO
 
@@ -118,6 +119,9 @@ class OffboardControl(Node):
             time_window=2.0,
             check_frequency=10
         )
+        # 初始化舵机控制器
+        self.servo_control = ServoControl()
+
 
     def target_position_callback(self, msg: Point):
         """Callback function for receiving target position."""
@@ -200,7 +204,8 @@ class OffboardControl(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher.publish(msg)
     
-    def drop_payload(self):
+    def drop_payload(self,servo_1,servo_2):
+        self.servo_control.open_servo(servo_1,servo_2)
 
         self.get_logger().info("---------------Payload dropped.-------------------")
 

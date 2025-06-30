@@ -8,7 +8,7 @@ from px4_msgs.msg import VehicleCommand
 from px4_msgs.msg import VehicleStatus
 import time
 
-class ActuatorControlNode(Node):
+class ServoControl(Node):
     """
     一个通过 XRCE-DDS (Micro-ROS) 直接向 PX4 发送执行器控制命令的节点。
     它会循环改变第一个执行器的输出值。
@@ -48,16 +48,6 @@ class ActuatorControlNode(Node):
         self.arming_state = msg.arming_state
 
     def publish_actuator_command(self, values):
-        """
-        发布 MAV_CMD_DO_SET_ACTUATOR 命令来控制执行器。
-
-        根据 PX4 文档:
-        - values[0] (填充到 param1) 控制配置为 "Peripheral via Actuator Set 1" 的输出。
-        - values[1] (填充到 param2) 控制配置为 "Peripheral via Actuator Set 2" 的输出。
-        - ... 以此类推，直到 values[5] (param6)。
-
-        :param values: 一个包含最多6个执行器值的列表或元组，范围为 -1.0 到 1.0。
-        """
         if len(values) > 6:
             self.get_logger().warning('输入的值超过6个，多余的值将被忽略。')
         
@@ -83,43 +73,11 @@ class ActuatorControlNode(Node):
         self.command_pub.publish(msg)
         self.get_logger().info(f"发送执行器命令, param1: {msg.param1:.2f}, param2: {msg.param2:.2f}, ...")
 
-    def run_control_loop(self):
-        '''while not self.is_connected:
-            self.get_logger().info('等待飞控连接中...', throttle_duration_sec=2)
-            rclpy.spin_once(self, timeout_sec=1.0)'''
+    def open_servo(self,servo_1=0,servo_2=0):
+        # 定义一个包含6个值的列表，以匹配 MAV_CMD_DO_SET_ACTUATOR 的参数
+        actuator_values = [0.0] * 6
+        actuator_values[0] = servo_1
+        actuator_values[1] = servo_2
+        self.publish_actuator_command(actuator_values)
 
-        if self.arming_state != VehicleStatus.ARMING_STATE_ARMED:
-            self.get_logger().warning('飞控未解锁！MAV_CMD_DO_SET_ACTUATOR 命令可能不会生效。')
 
-        while rclpy.ok():
-            # 定义一个包含6个值的列表，以匹配 MAV_CMD_DO_SET_ACTUATOR 的参数
-            actuator_values = [0.0] * 6
-
-            # 1. 设置第一个执行器为 -1.0
-            actuator_values[0] = -1.0
-            self.publish_actuator_command(actuator_values)
-            time.sleep(5)
-
-            # 2. 设置第一个执行器为 0.0 (中立位)
-            actuator_values[0] = 0.0
-            self.publish_actuator_command(actuator_values)
-            time.sleep(5)
-
-            # 3. 设置第一个执行器为 1.0
-            actuator_values[0] = 1.0
-            self.publish_actuator_command(actuator_values)
-            time.sleep(5)
-
-def main(args=None):
-    rclpy.init(args=args)
-    actuator_control_node = ActuatorControlNode()
-    try:
-        actuator_control_node.run_control_loop()
-    except KeyboardInterrupt:
-        actuator_control_node.get_logger().info('节点被用户关闭')
-    finally:
-        actuator_control_node.destroy_node()
-        rclpy.shutdown()
-
-if __name__ == '__main__':
-    main()
