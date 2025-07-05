@@ -4,6 +4,7 @@ import cv2
 from ultralytics import YOLO
 from enum import Enum
 import math
+import numpy as np
 
 # 这个类中的状态只关心视觉任务本身
 class VisualState(Enum):
@@ -18,20 +19,44 @@ class VisualServoingController:
     它负责处理图像、运行YOLO模型，并根据其内部状态返回指令。
     """
     def __init__(self, model_path, confidence_threshold=0.5, target_class_name='circle', center_tolerance_px=25):
-        print("视觉控制器：正在加载模型...")
-        self.model = YOLO(model_path)
-        print("视觉控制器：模型加载成功。")
+        # 在 __init__ 中，我们只保存参数，不执行任何耗时操作
+        print("视觉控制器：对象已创建，模型待加载。")
+        self.model_path = model_path
+        self.model = None  # 先将模型设置为空
+        self.is_model_loaded = False
 
         self.CONFIDENCE_THRESHOLD = confidence_threshold
-        self.TARGET_CLASS_NAME = target_class_name
-        self.CENTER_TOLERANCE_PX = center_tolerance_px
-
-        # 内部状态管理
+        # ... 其他参数保持不变 ...
         self.visual_state = VisualState.GLOBAL_SEARCH
-        #当前目标：左、中、右
-        self.current_target_label = None  # e.g., "Middle", "Left", "Right"
+        self.current_target_label = None
         self.initial_target_map = {}
 
+        self.CENTER_TOLERANCE_PX = center_tolerance_px
+        self.TARGET_CLASS_NAME = target_class_name
+    
+    def load_model(self):
+        """
+        一个独立的方法，专门用于加载模型。
+        这个方法应该在ROS节点进入主循环后调用。
+        """
+        if self.is_model_loaded:
+            print("视觉控制器：模型已经加载过了。")
+            return
+        
+        try:
+            print("视觉控制器：正在加载模型...")
+            self.model = YOLO(self.model_path)
+            # 在这里可以进行一次虚拟推理来预热GPU
+            dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            self.model(dummy_frame, verbose=False) 
+            self.is_model_loaded = True
+            print("视觉控制器：模型加载并预热成功。")
+            return True
+        except Exception as e:
+            print(f"视觉控制器：加载模型失败！错误: {e}")
+            self.is_model_loaded = False
+            return False
+    
     def reset_for_new_mission(self):
         """重置整个视觉任务，回到最初的全局搜索状态。"""
         print("视觉控制器：任务重置，返回全局搜索。")
@@ -90,6 +115,12 @@ class VisualServoingController:
         处理单帧图像的核心方法。
         返回: (visual_state, command, annotated_frame)
         """
+        # 在处理第一帧前，确保模型已加载
+        if not self.is_model_loaded:
+            print("错误：在处理图像前，模型尚未加载！")
+            # 返回一个安全的状态
+            return self.visual_state, None, frame
+        
         height, width, _ = frame.shape
         image_center = (width // 2, height // 2)
         

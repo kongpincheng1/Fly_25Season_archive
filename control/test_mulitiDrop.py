@@ -12,9 +12,9 @@ from control.DronePositionChecker import DronePositionChecker
 from control.AlignmentChecker import AlignmentChecker
 from control.ServoControl import ServoControl
 from control.visual_servoing import VisualServoingController, VisualState # 从你的包中导入视觉控制器
+import cv2
+CAMERA_NAME_HINT = "USB"
 
-# from control.visualize import Visualize
-# import RPi.GPIO as GPIO
 
 class MissionState(Enum):
     START = 0
@@ -61,10 +61,13 @@ class OffboardControl(Node):
             model_path='/home/weights/best.engine', # 你的模型路径
             target_class_name='circle'
         )
-        self.cap = cv2.VideoCapture(0) # 打开摄像头
+        device_path = self.find_video_device_by_name(CAMERA_NAME_HINT)
+        self.cap = cv2.VideoCapture(device_path if device_path else 0)        
         if not self.cap.isOpened():
             self.get_logger().error("无法打开摄像头！")
             rclpy.shutdown()
+        
+        self.is_vision_ready = False
 
         # === 新增：任务流程管理变量 ===
         self.mission_state = MissionState.START
@@ -235,7 +238,21 @@ class OffboardControl(Node):
         msg.from_external = True
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher.publish(msg)
-    
+
+    def find_video_device_by_name(self,name_hint="USB Camera"):
+    # (This function remains unchanged)
+        try:
+            result = subprocess.run(["v4l2-ctl", "--list-devices"], capture_output=True, text=True, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError): return None
+        lines = result.stdout.splitlines()
+        matched_device_name = False
+        for line in lines:
+            if name_hint in line: matched_device_name = True
+            elif matched_device_name and "/dev/video" in line:
+                match = re.search(r"(/dev/video\d+)", line)
+                if match: return match.group(1)
+        return None
+
     def execute_visual_command(self, command):
         """根据视觉指令来控制无人机"""
         if command is None:
@@ -438,6 +455,15 @@ class OffboardControl(Node):
         """Callback function for the timer."""
         self.publish_offboard_control_heartbeat_signal()
         
+        if not self.is_vision_ready:
+            # 只有在第一次进入timer_callback时执行
+            if self.vision_controller.load_model():
+                self.is_vision_ready = True
+                self.get_logger().info("视觉系统准备就绪，开始执行任务逻辑。")
+            else:
+                self.get_logger().error("视觉系统初始化失败，节点将不执行任务。")
+                return # 如果模型加载失败，直接返回，不执行后续逻辑          
+        
         # 更新日志计数器
         self.log_counter += 1
         
@@ -508,7 +534,10 @@ class OffboardControl(Node):
                         self.mission_state = MissionState.LANDING
                         return
                     current_target_name = self.target_priority[self.current_target_index]
-                    self.vision_controller.set_target(current_target_name)
+
+                    if self.vision_controller.visual_state not in [VisualState.CENTERING, VisualState.TARGET_LOCKED]:
+                        self.get_logger().info(f"设置新目标: [{current_target_name}]")
+                        self.vision_controller.set_target(current_target_name)
 
                     if visual_state == VisualState.CENTERING:
                         self.execute_visual_command(visual_command)
@@ -538,12 +567,10 @@ class OffboardControl(Node):
                                     self.second_alignment_checker.reset()
                                     #set_target后Visual_State变为CENTERING
                                 else:
-                                    self.mission_state = MissionState.LANDING                    
-
+                                    pass
                             if self.Is_Finish_1st_Drop and self.Is_Finish_2nd_Drop:
                                 self.is_FinishDrop = True
 
-                
             if self.is_FinishDrop: 
                 self.fly_to_position(float(self.droping_x), float(self.droping_y), float(self.droping_z))
 
