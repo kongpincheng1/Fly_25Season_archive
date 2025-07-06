@@ -13,6 +13,9 @@ from control.AlignmentChecker import AlignmentChecker
 from control.ServoControl import ServoControl
 from control.visual_servoing import VisualServoingController, VisualState # 从你的包中导入视觉控制器
 import cv2
+from enum import Enum
+import subprocess
+import re
 CAMERA_NAME_HINT = "USB"
 
 
@@ -70,7 +73,7 @@ class OffboardControl(Node):
         self.is_vision_ready = False
 
         # === 新增：任务流程管理变量 ===
-        self.mission_state = MissionState.START
+        self.mission_state = MissionState.GLOBAL_SEARCH
         self.target_priority = ["Middle", "Left", "Right"]
         self.current_target_index = 0
         self.visited_targets_count = 0
@@ -103,6 +106,7 @@ class OffboardControl(Node):
         self.afterAlign_descentHeight = 0.7
         #GLOBAL_SEARCH高度
         self.global_search_height = -5.0
+        self.global_search_target_z = None
 
         self.initial_z = None  # 初始高度
         self.initial_x = None  #
@@ -120,6 +124,7 @@ class OffboardControl(Node):
         self.Is_Finish_1st_Drop = False
         self.Is_Finish_2nd_Drop = False
 
+        self.Is_Descending_to_depth_camera_height = False
 
         self.droping_x = None
         self.droping_y = None
@@ -144,13 +149,13 @@ class OffboardControl(Node):
           # 初始化 AlignmentChecker
         self.first_alignment_checker = AlignmentChecker(
             logger_func=self.get_logger().info,  # 传递日志记录函数
-            threshold=0.18,
+            threshold=0.15,
             time_window=2.0,
             check_frequency=5
         )
         self.second_alignment_checker = AlignmentChecker(
             logger_func=self.get_logger().info,  # 传递日志记录函数
-            threshold=0.15,
+            threshold=0.10,
             time_window=2.0,
             check_frequency=10
         )
@@ -430,7 +435,10 @@ class OffboardControl(Node):
             self.target_position = None
             
             if self.first_alignment_complete and self.second_alignment_complete:
-                self.drop_payload(-1.0,1.0)
+                if not self.Is_Finish_1st_Drop:
+                    self.drop_payload(-1.0,1.0)
+                else:
+                    self.drop_payload(1.0,-1.0)
                 self.droping_x = self.vehicle_local_position.x
                 self.droping_y = self.vehicle_local_position.y
                 self.droping_z = self.vehicle_local_position.z
@@ -521,8 +529,8 @@ class OffboardControl(Node):
             if self.is_AtDropArea and not self.is_FinishDrop:
                 if self.mission_state == MissionState.GLOBAL_SEARCH:
                     #上升到global——search高度
-                    global_height = float(self.initial_z+self.global_search_height)
-                    self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, global_height)
+                    self.global_search_target_z = float(self.initial_z+self.global_search_height)
+                    self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.global_search_target_z)
 
                     if self.vision_controller.initial_target_map:
                         self.get_logger().info("全局搜索完成，进入目标打击循环。")
@@ -543,10 +551,17 @@ class OffboardControl(Node):
                         self.execute_visual_command(visual_command)
 
                     elif visual_state == VisualState.TARGET_LOCKED:
-                        self.get_logger().info(f"目标 [{current_target_name}] 已锁定，准备下降。")
+            
                         # 在这里执行下降和投放逻辑
-                        self.publish_position_setpoint(self.vehicle_local_position.x, self.vehicle_local_position.y, self.takeoff_target_height)
+                        if not self.Is_Descending_to_depth_camera_height:
+                            self.get_logger().info(f"目标 [{current_target_name}] 已锁定，准备下降。")
+                            self.publish_position_setpoint(self.vehicle_local_position.x, self.vehicle_local_position.y, self.takeoff_target_height)
+                        
                         if abs(self.vehicle_local_position.z - self.takeoff_target_height) < 0.2:
+                            self.Is_Descending_to_depth_camera_height = True
+                            self.get_logger().info(f"目标 [{current_target_name}] 已锁定，下降完成。")
+                        
+                        if self.Is_Descending_to_depth_camera_height == True :
                             self.adjust_to_target()
                             if self.Is_Finish_1st_Drop and self.visited_targets_count == 0:                        
                                 # 更新任务进度
@@ -556,13 +571,14 @@ class OffboardControl(Node):
                                 if self.visited_targets_count < len(self.target_priority):
                                     # 重置视觉状态以寻找下一个目标，并先爬升回巡航高度
                                     self.get_logger().info("正在爬升回巡航高度...")
-                                    self.publish_position_setpoint(self.vehicle_local_position.x, self.vehicle_local_position.y, self.cruise_height)
+                                    #回到投放区域搜寻高度
+                                    self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.global_search_target_z)
                                     # 重置视觉状态机以寻找下一个目标
                                     next_target_name = self.target_priority[self.current_target_index]
                                     self.vision_controller.set_target(next_target_name)
 
-                                    self.first_alignment_complete = True
-                                    self.second_alignment_complete = True
+                                    self.first_alignment_complete = False
+                                    self.second_alignment_complete = False
                                     self.first_alignment_checker.reset()
                                     self.second_alignment_checker.reset()
                                     #set_target后Visual_State变为CENTERING
@@ -573,7 +589,9 @@ class OffboardControl(Node):
 
             if self.is_FinishDrop: 
                 self.fly_to_position(float(self.droping_x), float(self.droping_y), float(self.droping_z))
-
+        else:
+            self.get_logger().info("启动offboard模式失败")
+            return
         if self.offboard_setpoint_counter < 30:
             self.offboard_setpoint_counter += 1
 
