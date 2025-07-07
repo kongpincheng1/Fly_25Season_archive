@@ -65,15 +65,23 @@ class OffboardControl(Node):
         unique_photo_path = os.path.join(base_photo_path, f"run_{run_timestamp}")
         self.get_logger().info(f"This run's photos will be saved to: {unique_photo_path}")
         
+        # <<< 新增：视频路径和文件名 >>>
+        base_video_path = '/home/video_recodes' # 你可以指定一个新的文件夹
+        unique_video_filename = f"mission_{run_timestamp}.avi" # AVI格式与MJPG编码器配合良好        
         
-        # === 新增：初始化视觉部分 ===
+        # === 初始化视觉部分 (带视频录制功能) ===
         self.vision_controller = VisualServoingController(
-            model_path='/home/weights/0706.engine', # 你的模型路径
+            model_path='/home/weights/0706.engine',
             target_class_name='circle',
-            # --- 在这里配置拍照功能 ---
-            enable_photo_capture=True,  # 设置为 True 来开启拍照
-            photo_save_path=unique_photo_path, # 【重要】请修改为你希望保存照片的路径
-            photo_capture_interval=30  # 每 60 帧拍一张
+            # 拍照功能
+            enable_photo_capture=True,
+            photo_save_path=unique_photo_path, 
+            photo_capture_interval=30,
+            # <<< 新增：启用并配置视频录制 >>>
+            enable_video_recording=True,           # 设置为 True 来开启录制
+            video_save_path=base_video_path,       # 视频保存的目录
+            video_filename=unique_video_filename,  # 带有时间戳的唯一文件名
+            video_fps=30.0                         # 视频帧率 (与你的timer频率匹配)
         )
         
         device_path = self.find_video_device_by_name(CAMERA_NAME_HINT)
@@ -256,6 +264,22 @@ class OffboardControl(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.vehicle_command_publisher.publish(msg)
 
+        # <<< 新增：重写 destroy_node 方法以进行清理 >>>
+    def destroy_node(self):
+        """在节点关闭前，执行必要的清理工作。"""
+        self.get_logger().info("节点正在关闭，执行清理程序...")
+        # 清理视觉控制器（保存视频）
+        if self.vision_controller:
+            self.vision_controller.cleanup()
+        # 清理摄像头
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+        # 关闭所有OpenCV窗口
+        cv2.destroyAllWindows()
+        # 调用父类的方法完成ROS节点的销毁
+        super().destroy_node()
+        self.get_logger().info("清理完成，节点已关闭。")
+    
     def find_video_device_by_name(self,name_hint="USB Camera"):
     # (This function remains unchanged)
         try:
@@ -611,9 +635,14 @@ def main(args=None) -> None:
     print('Starting offboard control node...')
     rclpy.init(args=args)
     offboard_control = OffboardControl()
-    rclpy.spin(offboard_control)
-    offboard_control.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(offboard_control)
+    except KeyboardInterrupt:
+        print("程序被用户中断 (Ctrl+C)")
+    finally:
+        # 确保节点在退出时被正确销毁，从而触发我们的清理逻辑
+        offboard_control.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == '__main__':
     try:

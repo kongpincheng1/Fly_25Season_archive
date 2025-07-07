@@ -23,10 +23,15 @@ class VisualServoingController:
     """
     def __init__(self, model_path, confidence_threshold=0.5, target_class_name='circle', 
                  center_tolerance_px=25, 
-                 # === 新增参数 ===
+                 # 拍照功能参数
                  enable_photo_capture: bool = False, 
                  photo_save_path: str = '/tmp/drone_captures',
-                 photo_capture_interval: int = 30):
+                 photo_capture_interval: int = 30,
+                 # <<< 新增：视频录制相关的参数 >>>
+                 enable_video_recording: bool = False,
+                 video_save_path: str = '/tmp/drone_videos',
+                 video_filename: str = 'output.avi',
+                 video_fps: float = 30.0):
         """
         初始化视觉控制器。
         :param enable_photo_capture: bool, 是否启用拍照功能。
@@ -55,7 +60,18 @@ class VisualServoingController:
         if self.enable_photo_capture:
             os.makedirs(self.photo_save_path, exist_ok=True)
             print(f"拍照功能已启用，照片将保存到: {self.photo_save_path}")
-
+        
+        # <<< 新增：视频录制相关的实例变量 >>>
+        self.enable_video_recording = enable_video_recording
+        self.video_writer = None  # 先初始化为None
+        self.video_fps = video_fps
+        self.video_full_path = None
+        if self.enable_video_recording:
+            # 确保目录存在
+            os.makedirs(video_save_path, exist_ok=True)
+            self.video_full_path = os.path.join(video_save_path, video_filename)
+            print(f"视频录制功能已启用，视频将保存为: {self.video_full_path}")
+    
     # ... (load_model, reset_for_new_mission, set_target, _find_active_target, _get_drone_command 方法保持不变) ...
     def load_model(self):
         """
@@ -133,6 +149,13 @@ class VisualServoingController:
         elif dy < -self.CENTER_TOLERANCE_PX: command.append("向前平移")
         return " & ".join(command)
         
+        # <<< 新增：清理方法，用于安全关闭视频文件 >>>
+    def cleanup(self):
+        """在程序结束时调用，用于释放资源，特别是关闭视频写入器。"""
+        if self.video_writer is not None:
+            self.video_writer.release()
+            print(f"视频文件已成功保存并关闭: {self.video_full_path}")
+
     def process_frame(self, frame):
         """
         处理单帧图像的核心方法。
@@ -201,5 +224,17 @@ class VisualServoingController:
         
         cv2.rectangle(annotated_frame, (image_center[0] - self.CENTER_TOLERANCE_PX, image_center[1] - self.CENTER_TOLERANCE_PX), (image_center[0] + self.CENTER_TOLERANCE_PX, image_center[1] + self.CENTER_TOLERANCE_PX), (0, 0, 255), 2)
         cv2.putText(annotated_frame, f"Visual State: {self.visual_state.name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        
+        # <<< 新增：视频写入逻辑 >>>        
+        if self.enable_video_recording:
+            # 如果是第一帧，则初始化VideoWriter
+            if self.video_writer is None:
+                fourcc = cv2.VideoWriter_fourcc(*'MJPG') # MJPG适用于.avi格式
+                frame_size = (width, height)
+                self.video_writer = cv2.VideoWriter(self.video_full_path, fourcc, self.video_fps, frame_size)
+                print(f"视频录制已开始... 尺寸:{frame_size}, FPS:{self.video_fps}")
+            
+            # 将带有标注的帧写入视频文件
+            self.video_writer.write(frame)
 
         return self.visual_state, command, annotated_frame
