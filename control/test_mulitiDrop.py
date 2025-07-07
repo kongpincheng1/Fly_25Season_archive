@@ -16,6 +16,7 @@ import cv2
 from enum import Enum
 import subprocess
 import re
+import os
 CAMERA_NAME_HINT = "USB"
 
 
@@ -58,12 +59,23 @@ class OffboardControl(Node):
         self.target_position_subscriber = self.create_subscription(Point, '/target_position',
                                                                    self.target_position_callback, 10)
 
-
+        base_photo_path = '/home/image_recodes'
+        # Create a folder name based on the current date and time (e.g., 'run_20230727_153000')
+        run_timestamp = time.strftime("%Y%m%d_%H%M%S")
+        unique_photo_path = os.path.join(base_photo_path, f"run_{run_timestamp}")
+        self.get_logger().info(f"This run's photos will be saved to: {unique_photo_path}")
+        
+        
         # === 新增：初始化视觉部分 ===
         self.vision_controller = VisualServoingController(
-            model_path='/home/weights/best.engine', # 你的模型路径
-            target_class_name='circle'
+            model_path='/home/weights/0706.engine', # 你的模型路径
+            target_class_name='circle',
+            # --- 在这里配置拍照功能 ---
+            enable_photo_capture=True,  # 设置为 True 来开启拍照
+            photo_save_path=unique_photo_path, # 【重要】请修改为你希望保存照片的路径
+            photo_capture_interval=30  # 每 60 帧拍一张
         )
+        
         device_path = self.find_video_device_by_name(CAMERA_NAME_HINT)
         self.cap = cv2.VideoCapture(device_path if device_path else 0)        
         if not self.cap.isOpened():
@@ -97,7 +109,7 @@ class OffboardControl(Node):
 
 
         #起飞高度
-        self.takeoff_height = -2.0
+        self.takeoff_height = -2.2
         #向前飞行的距离
         self.forward_x = 2.3
         #最大步长
@@ -155,9 +167,9 @@ class OffboardControl(Node):
         )
         self.second_alignment_checker = AlignmentChecker(
             logger_func=self.get_logger().info,  # 传递日志记录函数
-            threshold=0.10,
+            threshold=0.08,
             time_window=2.0,
-            check_frequency=5
+            check_frequency=10
         )
         # 初始化舵机控制器
         self.servo_control = ServoControl()
@@ -304,7 +316,7 @@ class OffboardControl(Node):
             self.get_logger().info(f"target_height:{self.takeoff_target_height}")
         self.fly_to_position_FRD2NED(0.0, 0.0, self.takeoff_target_height)
 
-    def takeoff_height_check(self, threshold=0.22):
+    def takeoff_height_check(self, threshold=0.1):
         """
         检查是否到达相对目标高度
         :param threshold: 高度误差阈值
@@ -400,8 +412,8 @@ class OffboardControl(Node):
             current_x, current_y =self.coordinate_NED2FRD(current_xned,current_yned)
             distance = math.sqrt((self.target_position.x)**2+(self.target_position.y)**2)
             scale = self.align_maxstep/distance 
-            target_x_FRD = current_x + self.target_position.y + 0.055  # 0.05 为相机中心相对投放中心的误差。
-            target_y_FRD = current_y - self.target_position.x + 0.037
+            target_x_FRD = current_x + self.target_position.y -0.05  # 0.05 为相机中心相对投放中心的误差。
+            target_y_FRD = current_y - self.target_position.x
             target_x_NED, target_y_NED = self.coordinate_FRD2NED(target_x_FRD, target_y_FRD)
             if distance < self.align_maxstep:
                 target_x_FRD_f = current_x + self.target_position.y

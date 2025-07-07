@@ -1,10 +1,12 @@
-# 文件名: visual_servoing_controller.py
+# visual_servoing.py
 
 import cv2
 from ultralytics import YOLO
 from enum import Enum
 import math
 import numpy as np
+import os
+import time # 导入 time 模块
 
 # 这个类中的状态只关心视觉任务本身
 class VisualState(Enum):
@@ -17,23 +19,44 @@ class VisualServoingController:
     """
     一个独立的视觉伺服控制器类。
     它负责处理图像、运行YOLO模型，并根据其内部状态返回指令。
+    新增功能：可以根据设置，在处理图像时定期保存照片。
     """
-    def __init__(self, model_path, confidence_threshold=0.5, target_class_name='circle', center_tolerance_px=25):
-        # 在 __init__ 中，我们只保存参数，不执行任何耗时操作
+    def __init__(self, model_path, confidence_threshold=0.5, target_class_name='circle', 
+                 center_tolerance_px=25, 
+                 # === 新增参数 ===
+                 enable_photo_capture: bool = False, 
+                 photo_save_path: str = '/tmp/drone_captures',
+                 photo_capture_interval: int = 30):
+        """
+        初始化视觉控制器。
+        :param enable_photo_capture: bool, 是否启用拍照功能。
+        :param photo_save_path: str, 照片保存的目录路径。
+        :param photo_capture_interval: int, 每隔多少帧拍一张照片。
+        """
         print("视觉控制器：对象已创建，模型待加载。")
         self.model_path = model_path
-        self.model = None  # 先将模型设置为空
+        self.model = None
         self.is_model_loaded = False
 
         self.CONFIDENCE_THRESHOLD = confidence_threshold
-        # ... 其他参数保持不变 ...
         self.visual_state = VisualState.GLOBAL_SEARCH
         self.current_target_label = None
         self.initial_target_map = {}
-
         self.CENTER_TOLERANCE_PX = center_tolerance_px
         self.TARGET_CLASS_NAME = target_class_name
-    
+
+        # === 新增：拍照功能相关的实例变量 ===
+        self.enable_photo_capture = enable_photo_capture
+        self.photo_save_path = photo_save_path
+        self.photo_capture_interval = photo_capture_interval
+        self.frame_counter = 0
+
+        # 如果启用拍照，则创建保存目录
+        if self.enable_photo_capture:
+            os.makedirs(self.photo_save_path, exist_ok=True)
+            print(f"拍照功能已启用，照片将保存到: {self.photo_save_path}")
+
+    # ... (load_model, reset_for_new_mission, set_target, _find_active_target, _get_drone_command 方法保持不变) ...
     def load_model(self):
         """
         一个独立的方法，专门用于加载模型。
@@ -109,7 +132,7 @@ class VisualServoingController:
         if dy > self.CENTER_TOLERANCE_PX: command.append("向后平移")
         elif dy < -self.CENTER_TOLERANCE_PX: command.append("向前平移")
         return " & ".join(command)
-
+        
     def process_frame(self, frame):
         """
         处理单帧图像的核心方法。
@@ -118,13 +141,23 @@ class VisualServoingController:
         # 在处理第一帧前，确保模型已加载
         if not self.is_model_loaded:
             print("错误：在处理图像前，模型尚未加载！")
-            # 返回一个安全的状态
             return self.visual_state, None, frame
         
+        # === 新增：帧计数和拍照逻辑 ===
+        self.frame_counter += 1
+        if self.enable_photo_capture and (self.frame_counter % self.photo_capture_interval == 0):
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            filename = f"capture_{timestamp}_{self.frame_counter}.jpg"
+            filepath = os.path.join(self.photo_save_path, filename)
+            cv2.imwrite(filepath, frame)
+            # 你可以在这里使用 self.get_logger().info() 如果这个类能访问到logger
+            # 但作为一个独立的类，print更通用
+            print(f"已保存照片: {filepath}")
+
         height, width, _ = frame.shape
         image_center = (width // 2, height // 2)
         
-        # 1. 检测
+        # 1. 检测 (保持不变)
         results = self.model(frame, verbose=False)
         detections = []
         for box in results[0].boxes:
@@ -133,14 +166,13 @@ class VisualServoingController:
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 detections.append({'center': (cx, cy), 'box': [x1, y1, x2, y2]})
 
-        # 2. 视觉状态机逻辑
+        # 2. 视觉状态机逻辑 (保持不变)
         command = None
         if self.visual_state == VisualState.GLOBAL_SEARCH:
             if not self.initial_target_map and len(detections) == 3:
                 print("视觉控制器：全局搜索成功，已识别3个目标。")
                 detections.sort(key=lambda d: d['center'][0])
                 self.initial_target_map = {"Left": detections[0], "Middle": detections[1], "Right": detections[2]}
-                # 任务完成，等待外部指令
             
         elif self.visual_state == VisualState.CENTERING:
             if not detections:
@@ -156,17 +188,18 @@ class VisualServoingController:
                     self.visual_state = VisualState.LOST
                     command = "丢失目标"
 
-        # 3. 可视化 (在原图上绘制)
+        # 3. 可视化 (保持不变)
+        annotated_frame = frame.copy() # 复制一份以进行绘制，避免影响原始图像保存
         for det in detections:
-            cv2.rectangle(frame, (det['box'][0], det['box'][1]), (det['box'][2], det['box'][3]), (0, 255, 0), 2)
+            cv2.rectangle(annotated_frame, (det['box'][0], det['box'][1]), (det['box'][2], det['box'][3]), (0, 255, 0), 2)
         
         if self.visual_state == VisualState.CENTERING and detections:
              active_target = self._find_active_target(detections, width)
              if active_target:
-                cv2.rectangle(frame, (active_target['box'][0], active_target['box'][1]), (active_target['box'][2], active_target['box'][3]), (0, 255, 255), 3)
-                cv2.putText(frame, f"Tracking: {self.current_target_label}", (active_target['box'][0], active_target['box'][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
+                cv2.rectangle(annotated_frame, (active_target['box'][0], active_target['box'][1]), (active_target['box'][2], active_target['box'][3]), (0, 255, 255), 3)
+                cv2.putText(annotated_frame, f"Tracking: {self.current_target_label}", (active_target['box'][0], active_target['box'][1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
         
-        cv2.rectangle(frame, (image_center[0] - self.CENTER_TOLERANCE_PX, image_center[1] - self.CENTER_TOLERANCE_PX), (image_center[0] + self.CENTER_TOLERANCE_PX, image_center[1] + self.CENTER_TOLERANCE_PX), (0, 0, 255), 2)
-        cv2.putText(frame, f"Visual State: {self.visual_state.name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.rectangle(annotated_frame, (image_center[0] - self.CENTER_TOLERANCE_PX, image_center[1] - self.CENTER_TOLERANCE_PX), (image_center[0] + self.CENTER_TOLERANCE_PX, image_center[1] + self.CENTER_TOLERANCE_PX), (0, 0, 255), 2)
+        cv2.putText(annotated_frame, f"Visual State: {self.visual_state.name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-        return self.visual_state, command, frame
+        return self.visual_state, command, annotated_frame
