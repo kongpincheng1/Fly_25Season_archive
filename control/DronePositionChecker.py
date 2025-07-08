@@ -1,11 +1,14 @@
+# control/DronePositionChecker.py
+
 import math
 from collections import deque
 import time
 
 class DronePositionChecker:
-    def __init__(self, logger_func,tolerance=0.25, duration=3.0):
+    def __init__(self, logger_func, tolerance=0.17, duration=3.0):
         """
         初始化无人机位置检查器。
+        :param logger_func: 日志记录函数。
         :param tolerance: 位置变化容差（米）。
         :param duration: 判断稳定所需的时间（秒）。
         """
@@ -13,6 +16,7 @@ class DronePositionChecker:
         self.tolerance = tolerance
         self.duration = duration
         self.positions = deque()  # 用于存储最近位置和时间戳
+        self.log_counter = 0
 
     def update_position(self, position):
         """
@@ -31,19 +35,44 @@ class DronePositionChecker:
         判断无人机当前位置是否稳定。
         :return: 如果稳定返回 True，否则返回 False。
         """
-        if len(self.positions) < 100:
-            return False  # 数据不足时无法判断
+        # === 修复 1: 检查时间跨度而不是样本数量 ===
+        if not self.positions or (self.positions[-1][1] - self.positions[0][1] < self.duration):
+            # 如果队列为空，或者队列中数据覆盖的时间范围不足 self.duration，则认为数据不足
+            if self.log_counter % 30 == 0: # 每秒打印一次日志
+                 self.logger_func("数据采集中，尚未达到稳定检测所需时间...")
+            self.log_counter += 1
+            return False
 
-        # 计算所有位置的最大距离
-        max_distance = 0
-        for i in range(len(self.positions)):
-            for j in range(i + 1, len(self.positions)):
-                dist = self._distance(self.positions[i][0], self.positions[j][0])
-                max_distance = max(max_distance, dist)
+        # === 修复 2: 高效的 O(n) 稳定性计算 ===
+        # 初始化最小和最大坐标
+        min_pos = list(self.positions[0][0])
+        max_pos = list(self.positions[0][0])
 
-        self.logger_func(f"最大误差为{max_distance:.4f},m.")
-        self.logger_func(f"{self.tolerance},return:{max_distance<=self.tolerance}")
-        return max_distance <= self.tolerance
+        # 一次遍历找到所有坐标的最小和最大值
+        for pos_tuple in self.positions:
+            pos = pos_tuple[0]
+            for i in range(3): # 遍历 x, y, z
+                min_pos[i] = min(min_pos[i], pos[i])
+                max_pos[i] = max(max_pos[i], pos[i])
+
+        # 计算这个边界框的对角线距离
+        max_drift = self._distance(min_pos, max_pos)
+
+        is_currently_stable = max_drift <= self.tolerance
+        
+        # 为了避免日志刷屏，可以降低打印频率
+        if self.log_counter % 30 == 0: # 每秒打印一次日志
+            self.logger_func(f"稳定检测中: 最大漂移 {max_drift:.4f} m / 容差 {self.tolerance} m. 状态: {'稳定' if is_currently_stable else '不稳定'}")
+        self.log_counter += 1
+
+        return is_currently_stable
+
+    def reset(self):
+        """重置检查器状态"""
+        self.positions.clear()
+        self.log_counter = 0
+        self.logger_func("位置检查器已重置。")
+
 
     @staticmethod
     def _distance(pos1, pos2):

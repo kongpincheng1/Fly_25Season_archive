@@ -74,11 +74,11 @@ class OffboardControl(Node):
             model_path='/home/weights/0706.engine',
             target_class_name='circle',
             # 拍照功能
-            enable_photo_capture=True,
+            enable_photo_capture=False,
             photo_save_path=unique_photo_path, 
             photo_capture_interval=30,
             # <<< 新增：启用并配置视频录制 >>>
-            enable_video_recording=True,           # 设置为 True 来开启录制
+            enable_video_recording=False,           # 设置为 True 来开启录制
             video_save_path=base_video_path,       # 视频保存的目录
             video_filename=unique_video_filename,  # 带有时间戳的唯一文件名
             video_fps=30.0                         # 视频帧率 (与你的timer频率匹配)
@@ -324,20 +324,17 @@ class OffboardControl(Node):
 
         self.get_logger().info("---------------Payload dropped.-------------------")
 
-    def takeoff_relative(self, relative_height):
+    def takeoff_relative(self): # 不再需要 relative_height 参数
         """
-        起飞到相对当前高度的指定高度
-        :param relative_height: 相对高度 (比如上升 2 米)
+        飞向预先计算好的目标起飞高度。
+        这个函数假定 self.takeoff_target_height 和 self.init_yaw 等已经被设置。
         """
-        # 初始化高度
-        if self.initial_z is None:
-            self.initial_z = self.vehicle_local_position.z
-            self.initial_x = self.vehicle_local_position.x
-            self.initial_y = self.vehicle_local_position.y
-            self.init_yaw = self.vehicle_local_position.heading
-            self.takeoff_target_height = float(self.initial_z + relative_height)
-            self.get_logger().info(f"初始稳定位置记录为：x:{self.initial_x:.2f},y:{self.initial_y:.2f},z:{self.initial_z:.2f} 米, init_yaw:{self.init_yaw:.2f}")
-            self.get_logger().info(f"target_height:{self.takeoff_target_height}")
+        if self.takeoff_target_height is None:
+            self.get_logger().error("takeoff_relative 被调用，但目标起飞高度未设置！")
+            return
+        
+        # 直接命令无人机飞到（初始x, 初始y, 目标z）
+        # fly_to_position_FRD2NED 会自动使用 self.initial_x, self.initial_y, self.init_yaw
         self.fly_to_position_FRD2NED(0.0, 0.0, self.takeoff_target_height)
 
     def takeoff_height_check(self, threshold=0.1):
@@ -499,7 +496,7 @@ class OffboardControl(Node):
         """Callback function for the timer."""
         self.publish_offboard_control_heartbeat_signal()
         
-        if not self.is_vision_ready:
+        if False:
             # 只有在第一次进入timer_callback时执行
             if self.vision_controller.load_model():
                 self.is_vision_ready = True
@@ -530,28 +527,36 @@ class OffboardControl(Node):
 
         if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
             if not self.is_ReadyToTakeoff:
-                if self.log_counter % 10 == 0:
-                    self.get_logger().info("执行步骤1,判断飞机起飞前位置是否稳定")
-                    Position = (
-                        self.vehicle_local_position.x,
-                        self.vehicle_local_position.y,
-                        self.vehicle_local_position.z
-                    )
-                    self.get_logger().info(f"positon:{Position}")
-                self.initPositionChecker.update_position((
+                if self.initial_x is None:
+                    # 第一次进入此状态，记录当前位置为目标保持位置
+                    self.initial_x = self.vehicle_local_position.x
+                    self.initial_y = self.vehicle_local_position.y
+                    self.initial_z = self.vehicle_local_position.z
+                    self.init_yaw = self.vehicle_local_position.heading 
+                    self.get_logger().info(f"进入Offboard模式，锁定初始位置: x={self.initial_x:.2f}, y={self.initial_y:.2f}, z={self.initial_z:.2f}")
+
+                # 持续发布保持初始位置的指令
+                self.publish_position_setpoint(self.initial_x, self.initial_y, self.initial_z)
+
+                # 更新并检查位置稳定性
+                current_pos = (
                     self.vehicle_local_position.x,
                     self.vehicle_local_position.y,
                     self.vehicle_local_position.z
-                ))
+                )
+                self.initPositionChecker.update_position(current_pos)
+
                 if self.initPositionChecker.is_stable():
                     self.is_ReadyToTakeoff = True
                     self.arm()
-                    self.get_logger().info("起飞前位置稳定。")
+                    self.initial_z = self.vehicle_local_position.z
+                    self.takeoff_target_height = float(self.initial_z + self.takeoff_height)
+                    self.get_logger().info(f"起飞基准高度: {self.initial_z:.2f} m, 目标起飞高度: {self.takeoff_target_height:.2f} m")
 
             if self.is_ReadyToTakeoff and not self.is_AtTakeoffHeight:
                 if self.log_counter % 10 == 0:
                     self.get_logger().info("执行步骤2,上升到指定高度")
-                self.takeoff_relative(self.takeoff_height)
+                self.takeoff_relative()
                 self.takeoff_height_check()
                 # self.is_AtTakeoffHeight = False#  测试用
 
@@ -627,7 +632,6 @@ class OffboardControl(Node):
                 self.fly_to_position(float(self.droping_x), float(self.droping_y), float(self.droping_z))
         else:
             self.get_logger().info("启动offboard模式失败")
-            return
         if self.offboard_setpoint_counter < 30:
             self.offboard_setpoint_counter += 1
 
