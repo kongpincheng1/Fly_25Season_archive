@@ -41,7 +41,7 @@ class DronePositionChecker:
         time_span = self.positions[-1][1] - self.positions[0][1]
                 
         # === 修复 1: 检查时间跨度而不是样本数量 ===
-        if not math.isclose(time_span, self.duration, rel_tol=1e-5) and time_span < self.duration:
+        if not math.isclose(time_span, self.duration, rel_tol=0.1) and time_span < self.duration:
             if self.log_counter % 30 == 0:  # 每秒打印一次日志
                 self.logger_func("数据采集中，尚未达到稳定检测所需时间...")
                 self.logger_func(f"当前数据时间跨度: {time_span:.6f} / {self.duration} s")

@@ -85,7 +85,7 @@ class OffboardControl(Node):
         )
         
         device_path = self.find_video_device_by_name(CAMERA_NAME_HINT)
-        self.cap = cv2.VideoCapture(device_path if device_path else 0)        
+        self.cap = cv2.VideoCapture(2)        
         if not self.cap.isOpened():
             self.get_logger().error("无法打开摄像头！")
             rclpy.shutdown()
@@ -163,7 +163,7 @@ class OffboardControl(Node):
         self.initPositionChecker = DronePositionChecker(
             logger_func=self.get_logger().info,
             tolerance=0.17, 
-            duration=3.0
+            duration=5.0
         )
 
           # 初始化 AlignmentChecker
@@ -317,7 +317,7 @@ class OffboardControl(Node):
         
         # 转换回NED并发布
         target_x_ned, target_y_ned = self.coordinate_FRD2NED(target_x_frd, target_y_frd)
-        self.publish_position_setpoint(target_x_ned, target_y_ned, self.vehicle_local_position.z)    
+        self.publish_position_setpoint(target_x_ned, target_y_ned, self.global_search_target_z)    
     
     def drop_payload(self,servo_1,servo_2):
         self.servo_control.open_servo(servo_1,servo_2)
@@ -337,7 +337,7 @@ class OffboardControl(Node):
         # fly_to_position_FRD2NED 会自动使用 self.initial_x, self.initial_y, self.init_yaw
         self.fly_to_position_FRD2NED(0.0, 0.0, self.takeoff_target_height)
 
-    def takeoff_height_check(self, threshold=0.1):
+    def takeoff_height_check(self, threshold=0.22):
         """
         检查是否到达相对目标高度
         :param threshold: 高度误差阈值
@@ -358,7 +358,7 @@ class OffboardControl(Node):
         """Fly forward to the drop area."""
         self.DropArea_x, self.DropArea_y = self.fly_to_position_FRD2NED(x, 0, self.takeoff_target_height)
         
-    def fly_forward_check(self, threshold=0.1):
+    def fly_forward_check(self, threshold=0.2):
         """Check if the drone has reached the drop area."""
         current_x = self.vehicle_local_position.x
         current_y = self.vehicle_local_position.y
@@ -572,6 +572,8 @@ class OffboardControl(Node):
                     #上升到global——search高度
                     self.global_search_target_z = float(self.initial_z+self.global_search_height)
                     self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.global_search_target_z)
+                    if self.log_counter % 10 == 0:
+                        self.get_logger().info("进行全局搜索")
 
                     if self.vision_controller.initial_target_map:
                         self.get_logger().info("全局搜索完成，进入目标打击循环。")
@@ -596,15 +598,14 @@ class OffboardControl(Node):
                         # 在这里执行下降和投放逻辑
                         if not self.Is_Descending_to_depth_camera_height:
                             self.get_logger().info(f"目标 [{current_target_name}] 已锁定，准备下降。")
-                            self.publish_position_setpoint(self.vehicle_local_position.x, self.vehicle_local_position.y, self.takeoff_target_height)
-                        
-                        if abs(self.vehicle_local_position.z - self.takeoff_target_height) < 0.2:
-                            self.Is_Descending_to_depth_camera_height = True
-                            self.get_logger().info(f"目标 [{current_target_name}] 已锁定，下降完成。")
+                            self.publish_position_setpoint(self.vehicle_local_position.x, self.vehicle_local_position.y, self.takeoff_target_height)                        
+                            if abs(self.vehicle_local_position.z - self.takeoff_target_height) < 0.2:
+                                self.Is_Descending_to_depth_camera_height = True
+                                self.get_logger().info(f"目标 [{current_target_name}] 已锁定，下降完成。")
                         
                         if self.Is_Descending_to_depth_camera_height == True :
-                            self.adjust_to_target()
-                            if self.Is_Finish_1st_Drop and self.visited_targets_count == 0:                        
+                            # self.adjust_to_target() #tag
+                            if True and self.visited_targets_count == 0:                        
                                 # 更新任务进度
                                 self.visited_targets_count += 1
                                 self.current_target_index += 1
@@ -620,6 +621,7 @@ class OffboardControl(Node):
 
                                     self.first_alignment_complete = False
                                     self.second_alignment_complete = False
+                                    self.Is_Descending_to_depth_camera_height = False
                                     self.first_alignment_checker.reset()
                                     self.second_alignment_checker.reset()
                                     #set_target后Visual_State变为CENTERING
