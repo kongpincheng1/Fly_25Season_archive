@@ -35,11 +35,16 @@ class DronePositionChecker:
         判断无人机当前位置是否稳定。
         :return: 如果稳定返回 True，否则返回 False。
         """
+        if not self.positions:
+            return False
+
+        time_span = self.positions[-1][1] - self.positions[0][1]
+                
         # === 修复 1: 检查时间跨度而不是样本数量 ===
-        if not self.positions or (self.positions[-1][1] - self.positions[0][1] < self.duration):
-            # 如果队列为空，或者队列中数据覆盖的时间范围不足 self.duration，则认为数据不足
-            if self.log_counter % 30 == 0: # 每秒打印一次日志
-                 self.logger_func("数据采集中，尚未达到稳定检测所需时间...")
+        if not math.isclose(time_span, self.duration, rel_tol=1e-5) and time_span < self.duration:
+            if self.log_counter % 30 == 0:  # 每秒打印一次日志
+                self.logger_func("数据采集中，尚未达到稳定检测所需时间...")
+                self.logger_func(f"当前数据时间跨度: {time_span:.6f} / {self.duration} s")
             self.log_counter += 1
             return False
 
