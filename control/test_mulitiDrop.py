@@ -59,19 +59,19 @@ class OffboardControl(Node):
         self.target_position_subscriber = self.create_subscription(Point, '/target_position',
                                                                    self.target_position_callback, 10)
 
-        base_photo_path = '/home/image_recodes'
+        base_photo_path = '~/image_recodes'
         # Create a folder name based on the current date and time (e.g., 'run_20230727_153000')
         run_timestamp = time.strftime("%Y%m%d_%H%M%S")
         unique_photo_path = os.path.join(base_photo_path, f"run_{run_timestamp}")
         self.get_logger().info(f"This run's photos will be saved to: {unique_photo_path}")
         
         # <<< 新增：视频路径和文件名 >>>
-        base_video_path = '/home/video_recodes' # 你可以指定一个新的文件夹
+        base_video_path = '~/video_recodes' # 你可以指定一个新的文件夹
         unique_video_filename = f"mission_{run_timestamp}.avi" # AVI格式与MJPG编码器配合良好        
         
         # === 初始化视觉部分 (带视频录制功能) ===
         self.vision_controller = VisualServoingController(
-            model_path='/home/weights/0706.engine',
+            model_path='/home/cqu/weights/best.pt',
             target_class_name='circle',
             # 拍照功能
             enable_photo_capture=False,
@@ -632,6 +632,7 @@ class OffboardControl(Node):
                 self.fly_to_position(float(self.droping_x), float(self.droping_y), float(self.droping_z))
         else:
             self.get_logger().info("启动offboard模式失败")
+            
         if self.offboard_setpoint_counter < 30:
             self.offboard_setpoint_counter += 1
 

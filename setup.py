@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'fly = control.latest_single_drop:main',
             'pub = control.sim_pub:main',
+            'mul = control.test_mulitiDrop:main',
         ],
     },
 )
