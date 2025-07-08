@@ -496,7 +496,7 @@ class OffboardControl(Node):
         """Callback function for the timer."""
         self.publish_offboard_control_heartbeat_signal()
         
-        if False:
+        if not self.is_vision_ready:
             # 只有在第一次进入timer_callback时执行
             if self.vision_controller.load_model():
                 self.is_vision_ready = True
