@@ -59,33 +59,33 @@ class OffboardControl(Node):
         self.target_position_subscriber = self.create_subscription(Point, '/target_position',
                                                                    self.target_position_callback, 10)
 
-        base_photo_path = '~/image_recodes'
+        base_photo_path = '/home/image_recodes'
         # Create a folder name based on the current date and time (e.g., 'run_20230727_153000')
         run_timestamp = time.strftime("%Y%m%d_%H%M%S")
         unique_photo_path = os.path.join(base_photo_path, f"run_{run_timestamp}")
         self.get_logger().info(f"This run's photos will be saved to: {unique_photo_path}")
         
         # <<< 新增：视频路径和文件名 >>>
-        base_video_path = '~/video_recodes' # 你可以指定一个新的文件夹
+        base_video_path = '/home/video_recodes' # 你可以指定一个新的文件夹
         unique_video_filename = f"mission_{run_timestamp}.avi" # AVI格式与MJPG编码器配合良好        
         
         # === 初始化视觉部分 (带视频录制功能) ===
         self.vision_controller = VisualServoingController(
-            model_path='/home/cqu/weights/best.pt',
+            model_path='/home/cqu/weights/0706.engine',
             target_class_name='circle',
             # 拍照功能
             enable_photo_capture=False,
             photo_save_path=unique_photo_path, 
             photo_capture_interval=30,
             # <<< 新增：启用并配置视频录制 >>>
-            enable_video_recording=False,           # 设置为 True 来开启录制
+            enable_video_recording=True,           # 设置为 True 来开启录制
             video_save_path=base_video_path,       # 视频保存的目录
             video_filename=unique_video_filename,  # 带有时间戳的唯一文件名
             video_fps=30.0                         # 视频帧率 (与你的timer频率匹配)
         )
         
         device_path = self.find_video_device_by_name(CAMERA_NAME_HINT)
-        self.cap = cv2.VideoCapture(2)        
+        self.cap = cv2.VideoCapture(device_path if device_path else 0)        
         if not self.cap.isOpened():
             self.get_logger().error("无法打开摄像头！")
             rclpy.shutdown()
@@ -433,8 +433,9 @@ class OffboardControl(Node):
             current_x, current_y =self.coordinate_NED2FRD(current_xned,current_yned)
             distance = math.sqrt((self.target_position.x)**2+(self.target_position.y)**2)
             scale = self.align_maxstep/distance 
-            target_x_FRD = current_x + self.target_position.y -0.05  # 0.05 为相机中心相对投放中心的误差。
-            target_y_FRD = current_y - self.target_position.x
+            target_x_FRD = current_x + self.target_position.y - 0.055  # 0.05 为相机中心相对投放中心的误差。
+            target_y_FRD = current_y - self.target_position.x - 0.032
+
             target_x_NED, target_y_NED = self.coordinate_FRD2NED(target_x_FRD, target_y_FRD)
             if distance < self.align_maxstep:
                 target_x_FRD_f = current_x + self.target_position.y
@@ -604,7 +605,7 @@ class OffboardControl(Node):
                                 self.get_logger().info(f"目标 [{current_target_name}] 已锁定，下降完成。")
                         
                         if self.Is_Descending_to_depth_camera_height == True :
-                            # self.adjust_to_target() #tag
+                            self.adjust_to_target() 
                             if True and self.visited_targets_count == 0:                        
                                 # 更新任务进度
                                 self.visited_targets_count += 1
