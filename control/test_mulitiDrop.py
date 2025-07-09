@@ -72,7 +72,6 @@ class OffboardControl(Node):
         # === 初始化视觉部分 (带视频录制功能) ===
         self.vision_controller = VisualServoingController(
             model_path='/home/cqu/weights/0706.engine',
-            target_class_name='circle',
             # 拍照功能
             enable_photo_capture=False,
             photo_save_path=unique_photo_path, 

@@ -21,7 +21,7 @@ class VisualServoingController:
     它负责处理图像、运行YOLO模型，并根据其内部状态返回指令。
     新增功能：可以根据设置，在处理图像时定期保存照片。
     """
-    def __init__(self, model_path, confidence_threshold=0.5, target_class_name='circle', 
+    def __init__(self, model_path, confidence_threshold=0.5, 
                  center_tolerance_px=25, 
                  # 拍照功能参数
                  enable_photo_capture: bool = False, 
@@ -48,7 +48,6 @@ class VisualServoingController:
         self.current_target_label = None
         self.initial_target_map = {}
         self.CENTER_TOLERANCE_PX = center_tolerance_px
-        self.TARGET_CLASS_NAME = target_class_name
 
         # === 新增：拍照功能相关的实例变量 ===
         self.enable_photo_capture = enable_photo_capture
@@ -184,7 +183,7 @@ class VisualServoingController:
         results = self.model(frame, verbose=False)
         detections = []
         for box in results[0].boxes:
-            if box.conf[0] > self.CONFIDENCE_THRESHOLD and self.model.names[int(box.cls[0])] == self.TARGET_CLASS_NAME:
+            if box.conf[0] > self.CONFIDENCE_THRESHOLD :
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 cx, cy = int((x1 + x2) / 2), int((y1 + y2) / 2)
                 detections.append({'center': (cx, cy), 'box': [x1, y1, x2, y2]})
@@ -234,7 +233,7 @@ class VisualServoingController:
                 self.video_writer = cv2.VideoWriter(self.video_full_path, fourcc, self.video_fps, frame_size)
                 print(f"视频录制已开始... 尺寸:{frame_size}, FPS:{self.video_fps}")
             
-            # 将带有标注的帧写入视频文件
+            # 将不带有标注的帧写入视频文件
             self.video_writer.write(frame)
 
         return self.visual_state, command, annotated_frame
