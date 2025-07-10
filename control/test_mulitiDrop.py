@@ -299,7 +299,7 @@ class OffboardControl(Node):
             return
 
         # 简单的比例控制，将指令转换为小的位置增量
-        step_size_xy = 0.2  # 水平移动步长
+        step_size_xy = 0.3  # 水平移动步长
         step_size_z = 0.0   # 这里我们只做水平调整
 
         current_x, current_y = self.coordinate_NED2FRD(self.vehicle_local_position.x, self.vehicle_local_position.y)
@@ -432,8 +432,8 @@ class OffboardControl(Node):
             current_x, current_y =self.coordinate_NED2FRD(current_xned,current_yned)
             distance = math.sqrt((self.target_position.x)**2+(self.target_position.y)**2)
             scale = self.align_maxstep/distance 
-            target_x_FRD = current_x + self.target_position.y - 0.055  # 0.05 为相机中心相对投放中心的误差。
-            target_y_FRD = current_y - self.target_position.x - 0.032
+            target_x_FRD = current_x + self.target_position.y - 0.052  # 0.05 为相机中心相对投放中心的误差。
+            target_y_FRD = current_y - self.target_position.x 
 
             target_x_NED, target_y_NED = self.coordinate_FRD2NED(target_x_FRD, target_y_FRD)
             if distance < self.align_maxstep:
