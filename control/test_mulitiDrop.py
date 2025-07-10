@@ -299,7 +299,7 @@ class OffboardControl(Node):
             return
 
         # 简单的比例控制，将指令转换为小的位置增量
-        step_size_xy = 0.1  # 水平移动步长
+        step_size_xy = 0.2  # 水平移动步长
         step_size_z = 0.0   # 这里我们只做水平调整
 
         current_x, current_y = self.coordinate_NED2FRD(self.vehicle_local_position.x, self.vehicle_local_position.y)
@@ -470,8 +470,10 @@ class OffboardControl(Node):
             if self.first_alignment_complete and self.second_alignment_complete:
                 if not self.Is_Finish_1st_Drop:
                     self.drop_payload(-1.0,1.0)
+                    self.get_logger().info("——————————————————————DROP————————————————————————")
                 else:
                     self.drop_payload(1.0,-1.0)
+                    self.get_logger().info("——————————————————————DROP————————————————————————")
                 self.droping_x = self.vehicle_local_position.x
                 self.droping_y = self.vehicle_local_position.y
                 self.droping_z = self.vehicle_local_position.z
@@ -605,7 +607,7 @@ class OffboardControl(Node):
                         
                         if self.Is_Descending_to_depth_camera_height == True :
                             self.adjust_to_target() 
-                            if True and self.visited_targets_count == 0:                        
+                            if self.Is_Finish_1st_Drop and self.visited_targets_count == 0:                        
                                 # 更新任务进度
                                 self.visited_targets_count += 1
                                 self.current_target_index += 1
