@@ -23,11 +23,11 @@ CAMERA_NAME_HINT = "USB"
 class MissionState(Enum):
     START = 0
     TAKING_OFF = 1
-    GLOBAL_SEARCH = 2       # 飞到高处，执行一次性的全局搜索
-    TARGETING_CYCLE = 3     # 进入针对每个目标的循环
+    GLOBAL_SEARCH = 2
+    TARGETING_CYCLE = 3
+    RECONFIRMING_TARGETS = 3.5  # <<< 新增的状态
     LANDING = 4
     MISSION_COMPLETE = 5
-
 
 class OffboardControl(Node):
     """Node for controlling a vehicle in offboard mode."""
@@ -116,7 +116,7 @@ class OffboardControl(Node):
 
 
         #起飞高度
-        self.takeoff_height = -2.2
+        self.takeoff_height = -2.3
         #向前飞行的距离
         self.forward_x = 2.3
         #最大步长
@@ -174,9 +174,9 @@ class OffboardControl(Node):
         )
         self.second_alignment_checker = AlignmentChecker(
             logger_func=self.get_logger().info,  # 传递日志记录函数
-            threshold=0.08,
+            threshold=0.10,
             time_window=2.0,
-            check_frequency=10
+            check_frequency=5
         )
         # 初始化舵机控制器
         self.servo_control = ServoControl()
@@ -471,16 +471,15 @@ class OffboardControl(Node):
                 if not self.Is_Finish_1st_Drop:
                     self.drop_payload(-1.0,1.0)
                     self.get_logger().info("——————————————————————DROP————————————————————————")
-                else:
+                    self.Is_Finish_1st_Drop = True
+                elif not self.Is_Finish_2nd_Drop:
                     self.drop_payload(1.0,-1.0)
                     self.get_logger().info("——————————————————————DROP————————————————————————")
+                    self.Is_Finish_2nd_Drop = True
                 self.droping_x = self.vehicle_local_position.x
                 self.droping_y = self.vehicle_local_position.y
                 self.droping_z = self.vehicle_local_position.z
-                if self.visited_targets_count==0:
-                    self.Is_Finish_1st_Drop = True
-                elif self.visited_targets_count ==1:
-                    self.Is_Finish_2nd_Drop = True
+
                 
         else:
             if self.last_found_x_NED and self.last_found_y_NED and self.last_found_z_NED:
@@ -580,6 +579,30 @@ class OffboardControl(Node):
                     if self.vision_controller.initial_target_map:
                         self.get_logger().info("全局搜索完成，进入目标打击循环。")
                         self.mission_state = MissionState.TARGETING_CYCLE
+                
+                elif self.mission_state == MissionState.RECONFIRMING_TARGETS: # <<< 新增的处理块
+                    self.get_logger().info("正在爬升并重新确认目标位置...")
+                    # 命令无人机飞到全局搜索高度
+                    self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.global_search_target_z)
+                    
+                    # 检查视觉控制器是否看到了3个目标
+                    num_targets_seen = self.vision_controller.get_current_detection_count()
+                    if self.log_counter % 10 == 0:
+                        self.get_logger().info(f"重新确认中... 当前看到 {num_targets_seen} / 3 个目标")
+
+                    # 当再次看到3个目标时，才真正进入下一个目标的打击流程
+                    if num_targets_seen == 3:
+                        self.get_logger().info("重新确认成功！已找到所有3个目标。准备攻击下一个目标。")
+                        
+                        # 重置对准相关的状态，为下一个目标做准备
+                        self.first_alignment_complete = False
+                        self.second_alignment_complete = False
+                        self.Is_Descending_to_depth_camera_height = False
+                        self.first_alignment_checker.reset()
+                        self.second_alignment_checker.reset()
+                        
+                        # 转换回目标打击循环状态
+                        self.mission_state = MissionState.TARGETING_CYCLE
 
                 # GLOBAL_SEARCH执行一次之后，mission_state状态都为TARGETING_CYCLE
                 elif self.mission_state == MissionState.TARGETING_CYCLE:
@@ -611,22 +634,14 @@ class OffboardControl(Node):
                                 # 更新任务进度
                                 self.visited_targets_count += 1
                                 self.current_target_index += 1
-
-                                if self.visited_targets_count < len(self.target_priority):
-                                    # 重置视觉状态以寻找下一个目标，并先爬升回巡航高度
-                                    self.get_logger().info("正在爬升回巡航高度...")
-                                    #回到投放区域搜寻高度
-                                    self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.global_search_target_z)
-                                    # 重置视觉状态机以寻找下一个目标
-                                    next_target_name = self.target_priority[self.current_target_index]
-                                    self.vision_controller.set_target(next_target_name)
-
-                                    self.first_alignment_complete = False
-                                    self.second_alignment_complete = False
-                                    self.Is_Descending_to_depth_camera_height = False
-                                    self.first_alignment_checker.reset()
-                                    self.second_alignment_checker.reset()
-                                    #set_target后Visual_State变为CENTERING
+                                
+                                if self.visited_targets_count < 2:
+                                    # 投放完成，不要直接设置下一个目标！
+                                    # 而是进入“重新确认”状态
+                                    self.get_logger().info("第一次投放完成。进入目标重新确认阶段。")
+                                    self.mission_state = MissionState.RECONFIRMING_TARGETS                                    
+                                    # 重置视觉控制器到通用搜索模式
+                                    self.vision_controller.reset_to_search_mode()
                                 else:
                                     pass
                             if self.Is_Finish_1st_Drop and self.Is_Finish_2nd_Drop:
