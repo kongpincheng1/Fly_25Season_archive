@@ -25,7 +25,8 @@ class MissionState(Enum):
     TAKING_OFF = 1
     GLOBAL_SEARCH = 2
     TARGETING_CYCLE = 3
-    RECONFIRMING_TARGETS = 3.5  # <<< 新增的状态
+    RECONFIRMING_TARGETS = 3.5 # <<< 新增的状态
+    PROACTIVE_SEARCH = 3.6  
     LANDING = 4
     MISSION_COMPLETE = 5
 
@@ -71,7 +72,7 @@ class OffboardControl(Node):
         
         # === 初始化视觉部分 (带视频录制功能) ===
         self.vision_controller = VisualServoingController(
-            model_path='/home/weights/0707.engine',
+            model_path='/home/weights/0711.engine',
             # 拍照功能
             enable_photo_capture=False,
             photo_save_path=unique_photo_path, 
@@ -105,18 +106,14 @@ class OffboardControl(Node):
         
 
         self.target_position = None
-        self.CurrentHeightFromCamera = 0.0
-        
-        self.already_reached = False
-        self.first_aligned = False
-        self.second_aligned = False
+
         self.last_found_x_NED = None
         self.last_found_y_NED = None
         self.last_found_z_NED = None
 
 
         #起飞高度
-        self.takeoff_height = -2.3
+        self.takeoff_height = -2.0
         #向前飞行的距离
         self.forward_x = 2.3
         #最大步长
@@ -155,6 +152,13 @@ class OffboardControl(Node):
         self.first_alignment_complete = False
         self.second_alignment_complete = False
 
+        self.proactive_search_distance = 0.6  # <<< 新增：可以调整这个值
+
+        # 为主动搜索阶段设置的状态变量
+        self.proactive_target_x = None
+        self.proactive_target_y = None
+        self.is_proactive_target_set = False # <<< 新增：用于确保目标点只计算一次
+
         # Create a timer to publish control commands
         self.timer = self.create_timer(0.03, self.timer_callback)
         
@@ -185,10 +189,6 @@ class OffboardControl(Node):
     def target_position_callback(self, msg: Point):
         """Callback function for receiving target position."""
         self.target_position = msg  
-
-
-    def current_height_callback(self, msg):
-        self.CurrentHeightFromCamera = msg.data
 
     def fly_to_position(self, x, y, z):
         """Fly to the specified position."""
@@ -432,8 +432,8 @@ class OffboardControl(Node):
             current_x, current_y =self.coordinate_NED2FRD(current_xned,current_yned)
             distance = math.sqrt((self.target_position.x)**2+(self.target_position.y)**2)
             scale = self.align_maxstep/distance 
-            target_x_FRD = current_x + self.target_position.y - 0.052  # 0.05 为相机中心相对投放中心的误差。
-            target_y_FRD = current_y - self.target_position.x 
+            target_x_FRD = current_x + self.target_position.y - 0.065  # 0.05 为相机中心相对投放中心的误差。
+            target_y_FRD = current_y - self.target_position.x + 0.033
 
             target_x_NED, target_y_NED = self.coordinate_FRD2NED(target_x_FRD, target_y_FRD)
             if distance < self.align_maxstep:
@@ -591,7 +591,7 @@ class OffboardControl(Node):
                         self.get_logger().info(f"重新确认中... 当前看到 {num_targets_seen} / 3 个目标")
 
                     # 当再次看到3个目标时，才真正进入下一个目标的打击流程
-                    if num_targets_seen == 3:
+                    if num_targets_seen > 1:
                         self.get_logger().info("重新确认成功！已找到所有3个目标。准备攻击下一个目标。")
                         
                         # 重置对准相关的状态，为下一个目标做准备
@@ -603,6 +603,63 @@ class OffboardControl(Node):
                         
                         # 转换回目标打击循环状态
                         self.mission_state = MissionState.TARGETING_CYCLE
+                
+                elif self.mission_state == MissionState.PROACTIVE_SEARCH:
+                    # --- 在这个状态下，无人机爬升并向下一个目标的大致方向移动 ---
+
+                    # 1. 计算主动搜索的目标点 (只在第一次进入时计算)
+                    if not self.is_proactive_target_set:
+                        self.get_logger().info("计算主动搜索的目标点...")
+                        
+                        # 确定下一个目标是左还是右
+                        next_target_name = self.target_priority[self.current_target_index]
+                        
+                        y_offset_frd = 0.0
+                        if "Left" in next_target_name:
+                            y_offset_frd = -self.proactive_search_distance # FRD坐标系中，Y轴负方向是左
+                            self.get_logger().info(f"下一个目标在左侧，向左移动 {self.proactive_search_distance} 米。")
+                        elif "Right" in next_target_name:
+                            y_offset_frd = self.proactive_search_distance # FRD坐标系中，Y轴正方向是右
+                            self.get_logger().info(f"下一个目标在右侧，向右移动 {self.proactive_search_distance} 米。")
+                        
+                        # 基于投水区的中心点，计算偏移后的NED坐标
+                        # 注意：这里我们使用 self.DropArea_x 和 self.DropArea_y 作为基准点
+                        # 这样可以避免从有微小误差的投放点开始计算
+                        base_x, base_y = self.DropArea_x, self.DropArea_y
+                        
+                        # 将FRD的偏移量转换为NED的偏移量
+                        delta_x_ned = 0 * math.cos(self.init_yaw) - y_offset_frd * math.sin(self.init_yaw)
+                        delta_y_ned = 0 * math.sin(self.init_yaw) + y_offset_frd * math.cos(self.init_yaw)
+
+                        # 计算最终的NED目标点
+                        self.proactive_target_x = base_x + delta_x_ned
+                        self.proactive_target_y = base_y + delta_y_ned
+                        
+                        self.is_proactive_target_set = True
+                        self.get_logger().info(f"主动搜索目标点(NED): x={self.proactive_target_x:.2f}, y={self.proactive_target_y:.2f}")
+
+                    # 2. 命令无人机飞向目标点，并爬升到全局搜索高度
+                    self.publish_position_setpoint(self.proactive_target_x, self.proactive_target_y, self.global_search_target_z)
+
+                    # 3. 检查是否已到达目标点
+                    current_x = self.vehicle_local_position.x
+                    current_y = self.vehicle_local_position.y
+                    height_error = abs(self.vehicle_local_position.z - self.global_search_target_z)
+                    distance_error = math.sqrt((current_x - self.proactive_target_x)**2 + (current_y - self.proactive_target_y)**2)
+                    
+                    if self.log_counter % 10 == 0:
+                        self.get_logger().info(f"主动搜索中... 距离目标点: {distance_error:.2f}米, 高度误差: {height_error:.2f}米")
+
+                    # 如果水平和垂直都接近目标位置，则认为此阶段完成
+                    if distance_error < 0.3 and height_error < 0.3:
+                        self.get_logger().info("主动搜索阶段完成，已到达预定搜索区域。")
+                        self.get_logger().info("现在切换到悬停确认阶段(RECONFIRMING_TARGETS)。")
+                        
+                        # 状态切换到确认阶段
+                        self.mission_state = MissionState.RECONFIRMING_TARGETS
+                        
+                        # 重置标志位，以便下次（如果还有第三个目标）可以再次使用
+                        self.is_proactive_target_set = False
 
                 # GLOBAL_SEARCH执行一次之后，mission_state状态都为TARGETING_CYCLE
                 elif self.mission_state == MissionState.TARGETING_CYCLE:
@@ -638,8 +695,8 @@ class OffboardControl(Node):
                                 if self.visited_targets_count < 2:
                                     # 投放完成，不要直接设置下一个目标！
                                     # 而是进入“重新确认”状态
-                                    self.get_logger().info("第一次投放完成。进入目标重新确认阶段。")
-                                    self.mission_state = MissionState.RECONFIRMING_TARGETS                                    
+                                    self.get_logger().info("第一次投放完成。进入主动搜索阶段。")
+                                    self.mission_state = MissionState.PROACTIVE_SEARCH                                    
                                     # 重置视觉控制器到通用搜索模式
                                     self.vision_controller.reset_to_search_mode()
                                 else:
@@ -651,6 +708,8 @@ class OffboardControl(Node):
                 self.fly_to_position(float(self.droping_x), float(self.droping_y), float(self.droping_z))
         else:
             self.get_logger().info("启动offboard模式失败")
+
+            
             
         if self.offboard_setpoint_counter < 30:
             self.offboard_setpoint_counter += 1
