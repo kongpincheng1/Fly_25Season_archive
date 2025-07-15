@@ -17,6 +17,8 @@ from enum import Enum
 import subprocess
 import re
 import os
+import argparse # <<< 新增
+import sys      # <<< 新增
 CAMERA_NAME_HINT = "USB"
 
 
@@ -33,7 +35,7 @@ class MissionState(Enum):
 class OffboardControl(Node):
     """Node for controlling a vehicle in offboard mode."""
 
-    def __init__(self) -> None:
+    def __init__(self,args) -> None:
         super().__init__('offboard_control_takeoff_and_land')
 
         # Configure QoS profile for publishing and subscribing
@@ -60,19 +62,17 @@ class OffboardControl(Node):
         self.target_position_subscriber = self.create_subscription(Point, '/target_position',
                                                                    self.target_position_callback, 10)
 
-        base_photo_path = '/home/image_recodes'
-        # Create a folder name based on the current date and time (e.g., 'run_20230727_153000')
+        base_photo_path = args.photo_path
+        base_video_path = args.video_path
+        
         run_timestamp = time.strftime("%Y%m%d_%H%M%S")
         unique_photo_path = os.path.join(base_photo_path, f"run_{run_timestamp}")
         self.get_logger().info(f"This run's photos will be saved to: {unique_photo_path}")
-        
-        # <<< 新增：视频路径和文件名 >>>
-        base_video_path = '/home/video_recodes' # 你可以指定一个新的文件夹
         unique_video_filename = f"mission_{run_timestamp}.avi" # AVI格式与MJPG编码器配合良好        
         
         # === 初始化视觉部分 (带视频录制功能) ===
         self.vision_controller = VisualServoingController(
-            model_path='/home/weights/0711.engine',
+            model_path=args.model_path,
             # 拍照功能
             enable_photo_capture=False,
             photo_save_path=unique_photo_path, 
@@ -84,7 +84,7 @@ class OffboardControl(Node):
             video_fps=30.0                         # 视频帧率 (与你的timer频率匹配)
         )
         
-        device_path = self.find_video_device_by_name(CAMERA_NAME_HINT)
+        device_path = self.find_video_device_by_name(args.camera_hint)
         self.cap = cv2.VideoCapture(device_path if device_path else 0)        
         if not self.cap.isOpened():
             self.get_logger().error("无法打开摄像头！")
@@ -106,22 +106,27 @@ class OffboardControl(Node):
         
 
         self.target_position = None
-
         self.last_found_x_NED = None
         self.last_found_y_NED = None
         self.last_found_z_NED = None
 
 
-        #起飞高度
-        self.takeoff_height = -2.0
-        #向前飞行的距离
-        self.forward_x = 2.3
-        #最大步长
-        self.align_maxstep = 0.2
-        #对准之后下降的高度
-        self.afterAlign_descentHeight = 0.7
-        #GLOBAL_SEARCH高度
-        self.global_search_height = -5.0
+        # <<< 修改：从命令行参数初始化任务参数 >>>
+        self.takeoff_height = args.takeoff_height
+        self.forward_x = args.forward_x
+        self.align_maxstep = args.align_maxstep
+        self.afterAlign_descentHeight = args.descent_height
+        self.global_search_height = args.search_height
+        self.proactive_search_distance = args.proactive_search_dist
+        
+        # <<< 新增：从命令行参数获取超时和延迟设置 >>>
+        self.drop_phase_timeout = args.drop_phase_timeout
+        self.search_timeout = args.search_timeout
+        self.second_align_maxtime = args.second_align_maxtime
+
+        self.depthcam_xoffset = args.depthcam_xoffset
+        self.depthcam_yoffset = args.depthcam_yoffset
+
         self.global_search_target_z = None
 
         self.initial_z = None  # 初始高度
@@ -131,6 +136,13 @@ class OffboardControl(Node):
 
         self.DropArea_x = None
         self.DropArea_y = None
+
+        # <<< 新增：用于计时超时的状态变量 >>>
+        self.drop_phase_start_time = None
+        self.second_align_start_timestamp = None
+        self.search1_phase_start_time = None
+        self.search2_phase_start_time = None
+        self.timeout_drop_start_time = None
 
         self.takeoff_target_height = None
         self.is_ReadyToTakeoff = False
@@ -148,11 +160,13 @@ class OffboardControl(Node):
 
         # 新增日志计数器，用于减少日志输出频率
         self.log_counter = 0
+        self.timeout_drop_count = 0
+        self.timeout_drop_delay = 1.0
 
         self.first_alignment_complete = False
         self.second_alignment_complete = False
 
-        self.proactive_search_distance = 0.6  # <<< 新增：可以调整这个值
+        
 
         # 为主动搜索阶段设置的状态变量
         self.proactive_target_x = None
@@ -170,17 +184,18 @@ class OffboardControl(Node):
         )
 
           # 初始化 AlignmentChecker
+        # <<< 修改：使用命令行参数来初始化 AlignmentChecker >>>
         self.first_alignment_checker = AlignmentChecker(
-            logger_func=self.get_logger().info,  # 传递日志记录函数
-            threshold=0.15,
-            time_window=2.0,
-            check_frequency=5
+            logger_func=self.get_logger().info,
+            threshold=args.first_align_threshold,
+            time_window=args.first_align_time_window,
+            check_frequency=args.first_align_check_freq
         )
         self.second_alignment_checker = AlignmentChecker(
-            logger_func=self.get_logger().info,  # 传递日志记录函数
-            threshold=0.10,
-            time_window=2.0,
-            check_frequency=5
+            logger_func=self.get_logger().info,
+            threshold=args.second_align_threshold,
+            time_window=args.second_align_time_window,
+            check_frequency=args.second_align_check_freq
         )
         # 初始化舵机控制器
         self.servo_control = ServoControl()
@@ -425,15 +440,15 @@ class OffboardControl(Node):
         return x_target, y_target
 
     def adjust_to_target(self):
-        """Adjust drone position towards the current target."""
+        """Adjust drone position towards the current target."""   
         if self.target_position:
             # Example logic: Adjust position incrementally based on target position
             current_xned,current_yned = self.vehicle_local_position.x, self.vehicle_local_position.y
             current_x, current_y =self.coordinate_NED2FRD(current_xned,current_yned)
             distance = math.sqrt((self.target_position.x)**2+(self.target_position.y)**2)
             scale = self.align_maxstep/distance 
-            target_x_FRD = current_x + self.target_position.y - 0.065  # 0.05 为相机中心相对投放中心的误差。
-            target_y_FRD = current_y - self.target_position.x + 0.033
+            target_x_FRD = current_x + self.target_position.y  +self.depthcam_xoffset  # 0.05 为相机中心相对投放中心的误差。
+            target_y_FRD = current_y - self.target_position.x  +self.depthcam_yoffset
 
             target_x_NED, target_y_NED = self.coordinate_FRD2NED(target_x_FRD, target_y_FRD)
             if distance < self.align_maxstep:
@@ -457,6 +472,8 @@ class OffboardControl(Node):
                 self.last_found_z_NED = self.takeoff_target_height
 
             elif self.first_alignment_complete and not self.second_alignment_complete:
+                if self.second_align_start_timestamp is None:
+                    self.second_align_start_timestamp = self.get_clock().now()
                 if self.log_counter % 10 == 0:
                     self.get_logger().info("Performing second alignment")
                 self.fly_to_position(target_x_NED_f, target_y_NED_f, self.takeoff_target_height + self.afterAlign_descentHeight)
@@ -466,16 +483,24 @@ class OffboardControl(Node):
                 self.last_found_z_NED = self.takeoff_target_height + self.afterAlign_descentHeight
 
             self.target_position = None
+            if self.second_align_start_timestamp is not None:
+                elapsed_drop_time = (self.get_clock().now() - self.second_align_start_timestamp).nanoseconds / 1e9
             
-            if self.first_alignment_complete and self.second_alignment_complete:
+            if self.first_alignment_complete and self.second_alignment_complete or elapsed_drop_time > self.second_align_maxtime:
+                if elapsed_drop_time > self.second_align_maxtime:
+                    self.get_logger().warn(f"第二次对准时间超过最大对准时间{self.second_align_maxtime},已执行投放。")
+
                 if not self.Is_Finish_1st_Drop:
                     self.drop_payload(-1.0,1.0)
                     self.get_logger().info("——————————————————————DROP————————————————————————")
                     self.Is_Finish_1st_Drop = True
+                    self.second_align_start_timestamp = None
                 elif not self.Is_Finish_2nd_Drop:
                     self.drop_payload(1.0,-1.0)
                     self.get_logger().info("——————————————————————DROP————————————————————————")
                     self.Is_Finish_2nd_Drop = True
+                    self.second_align_start_timestamp = None
+                
                 self.droping_x = self.vehicle_local_position.x
                 self.droping_y = self.vehicle_local_position.y
                 self.droping_z = self.vehicle_local_position.z
@@ -569,7 +594,38 @@ class OffboardControl(Node):
                 # self.is_AtDropArea = False #测试用
 
             if self.is_AtDropArea and not self.is_FinishDrop:
+                #======增加限时模块========
+                if self.drop_phase_start_time is None:
+                    self.get_logger().info(f"已到达投水区域，启动 {self.drop_phase_timeout} 秒投放任务倒计时。")
+                    self.drop_phase_start_time = self.get_clock().now()
+                
+                elapsed_drop_time = (self.get_clock().now() - self.drop_phase_start_time).nanoseconds / 1e9
+                if elapsed_drop_time > self.drop_phase_timeout:
+                    if self.timeout_drop_start_time is None:
+                        self.timeout_drop_start_time = self.get_clock().now()
+                    self.get_logger().warn(f"投放阶段超时（超过 {self.drop_phase_timeout} 秒），任务中止，进入侦察。")
+                    if self.timeout_drop_count==0:
+                        self.drop_payload(-1,1)
+                        self.timeout_drop_count+=1
+                    elasped_time = ( self.get_clock().now()-self.timeout_drop_start_time).nanoseconds / 1e9
+
+                    if elasped_time > self.timeout_drop_delay:
+                        self.drop_payload(1,-1)
+                        self.timeout_drop_count+=1
+                    if self.timeout_drop_count == 2:
+                        self.get_logger().warn(f"投放阶段超时（超过 {self.drop_phase_timeout} 秒），任务中止，已全部投放，进入侦察。")
+                        self.mission_state = MissionState.LANDING
+                        self.is_FinishDrop = True
+                        return
+                #======增加限时模块========
+                
                 if self.mission_state == MissionState.GLOBAL_SEARCH:
+                    
+                    #全局搜索限时10s
+                    if self.search1_phase_start_time is None:
+                        self.get_logger().info(f"开始全局搜索，限时 {self.search_timeout} 秒。")
+                        self.search1_phase_start_time = self.get_clock().now()
+                                        
                     #上升到global——search高度
                     self.global_search_target_z = float(self.initial_z+self.global_search_height)
                     self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.global_search_target_z)
@@ -579,22 +635,54 @@ class OffboardControl(Node):
                     if self.vision_controller.initial_target_map:
                         self.get_logger().info("全局搜索完成，进入目标打击循环。")
                         self.mission_state = MissionState.TARGETING_CYCLE
-                
+                    
+                    if self.search1_phase_start_time and (self.get_clock().now() - self.search1_phase_start_time).nanoseconds / 1e9 > self.search_timeout:
+                        if self.timeout_drop_start_time is None:
+                            self.timeout_drop_start_time = self.get_clock().now()
+                        self.get_logger().warn(f"第一次全局阶段超时（超过 {self.search_timeout} 秒），任务中止")
+                        if self.timeout_drop_count==0:
+                            self.drop_payload(-1,1)
+                            self.timeout_drop_count+=1
+                        elasped_time = ( self.get_clock().now()-self.timeout_drop_start_time).nanoseconds / 1e9
+                        if elasped_time > self.timeout_drop_delay:
+                            self.drop_payload(1,-1)
+                            self.timeout_drop_count+=1
+                        if self.timeout_drop_count==2:    
+                            self.get_logger().warn(f"全局搜索超时（超过 {self.search_timeout} 秒），未找到目标，全部投放。")
+                            self.mission_state = MissionState.LANDING
+                            return
+                    
                 elif self.mission_state == MissionState.RECONFIRMING_TARGETS: # <<< 新增的处理块
+                    if self.search2_phase_start_time is None:
+                        self.get_logger().info(f"开始第二次全局搜索，限时 {self.search_timeout} 秒。")
+                        self.search2_phase_start_time = self.get_clock().now()
+                    if self.search2_phase_start_time and (self.get_clock().now() - self.search2_phase_start_time).nanoseconds / 1e9 > self.search_timeout:
+                        if self.timeout_drop_start_time is None:
+                            self.timeout_drop_start_time = self.get_clock().now()
+                        self.get_logger().warn(f"第二次全局搜索超时（超过 {self.search_timeout} 秒），任务中止.")
+                        if self.timeout_drop_count==0:
+                            self.drop_payload(-1,1)
+                            self.timeout_drop_count+=1
+                        elasped_time = ( self.get_clock().now()-self.timeout_drop_start_time).nanoseconds / 1e9
+                        if elasped_time > self.timeout_drop_delay:
+                            self.drop_payload(1,-1)
+                            self.timeout_drop_count+=1
+                        if self.timeout_drop_count==2:    
+                            self.get_logger().error(f"第二次全局搜索超时（超过 {self.search_timeout} 秒），未找到目标，已全部投放。")
+                            self.mission_state = MissionState.LANDING
+                            return
+                    
                     self.get_logger().info("正在爬升并重新确认目标位置...")
-                    # 命令无人机飞到全局搜索高度
                     self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.global_search_target_z)
                     
-                    # 检查视觉控制器是否看到了3个目标
                     num_targets_seen = self.vision_controller.get_current_detection_count()
                     if self.log_counter % 10 == 0:
                         self.get_logger().info(f"重新确认中... 当前看到 {num_targets_seen} / 3 个目标")
 
-                    # 当再次看到3个目标时，才真正进入下一个目标的打击流程
+                    # 当再次看到大于2个目标时，才真正进入下一个目标的打击流程
                     if num_targets_seen > 1:
                         self.get_logger().info("重新确认成功！已找到所有3个目标。准备攻击下一个目标。")
-                        
-                        # 重置对准相关的状态，为下一个目标做准备
+
                         self.first_alignment_complete = False
                         self.second_alignment_complete = False
                         self.Is_Descending_to_depth_camera_height = False
@@ -709,21 +797,79 @@ class OffboardControl(Node):
         else:
             self.get_logger().info("启动offboard模式失败")
 
-            
-            
+
         if self.offboard_setpoint_counter < 30:
             self.offboard_setpoint_counter += 1
 
 def main(args=None) -> None:
-    print('Starting offboard control node...')
+    # 1. 初始化rclpy，它会处理ROS特有的参数
     rclpy.init(args=args)
-    offboard_control = OffboardControl()
+
+    # 2. 设置我们自己的命令行参数解析器
+    parser = argparse.ArgumentParser(description="Offboard control script for PX4 drone mission.")
+    
+    # 添加你想通过命令行配置的参数
+    parser.add_argument('--model-path', type=str, default='/home/weights/0711.engine',
+                        help='Path to the object detection model file.')
+    parser.add_argument('--photo-path', type=str, default='/home/image_recodes',
+                        help='Base directory to save captured photos.')
+    parser.add_argument('--video-path', type=str, default='/home/video_recodes',
+                        help='Base directory to save recorded mission videos.')
+    parser.add_argument('--camera-hint', type=str, default='USB',
+                        help='Hint to find the camera device name (e.g., "USB", "C920").')
+    parser.add_argument('--takeoff-height', type=float, default=-2.0,
+                        help='Takeoff height in meters (negative value for altitude).')
+    parser.add_argument('--forward-x', type=float, default=2.3,
+                        help='Forward distance to fly to the drop area in meters.')
+    parser.add_argument('--search-height', type=float, default=-5.0,
+                        help='Global search height in meters (negative value for altitude).')
+    parser.add_argument('--descent-height', type=float, default=1.0,
+                        help='Descent height after first alignment in meters (positive value).')
+    parser.add_argument('--align-maxstep', type=float, default=0.2,
+                        help='Maximum step size for each alignment adjustment.')
+    parser.add_argument('--proactive-search-dist', type=float, default=0.6,
+                        help='Distance to move sideways for proactive search.')
+    
+    # <<< 新增：在这里为 AlignmentChecker 添加参数 >>>
+    parser.add_argument('--first-align-threshold', type=float, default=0.15,
+                        help='Threshold (distance in meters) for the first alignment.')
+    parser.add_argument('--first-align-time-window', type=float, default=2.0,
+                        help='Time window (seconds) to maintain stability for the first alignment.')
+    parser.add_argument('--first-align-check-freq', type=int, default=5,
+                        help='Check frequency (how many timer calls per check) for the first alignment.')
+    parser.add_argument('--second-align-threshold', type=float, default=0.10,
+                        help='Threshold (distance in meters) for the second alignment.')
+    parser.add_argument('--second-align-time-window', type=float, default=3.0,
+                        help='Time window (seconds) to maintain stability for the second alignment.')
+    parser.add_argument('--second-align-check-freq', type=int, default=5,
+                        help='Check frequency (how many timer calls per check) for the second alignment.')    
+    
+    parser.add_argument('--drop-phase-timeout', type=float, default=90.0,
+                        help='Maximum time in seconds for the entire dropping phase.')
+    parser.add_argument('--search-timeout', type=float, default=10.0,
+                        help='Maximum time in seconds for each search attempt.')
+    parser.add_argument('--second-align-maxtime', type=float, default=10.0,
+                        help='Maximum time in seconds for each search attempt.')
+    parser.add_argument('--depthcam_xoffset', type=float, default=-0.065,
+                        help='Maximum time in seconds for each search attempt.')
+    parser.add_argument('--depthcam_yoffset', type=float, default=0.033,
+                        help='Maximum time in seconds for each search attempt.')
+    # 3. 解析参数
+    # 使用 rclpy.utilities.remove_ros_args 来确保我们只解析自己的参数，
+    # 这样可以安全地与 ROS2 的参数（如 --ros-args）一起使用。
+    custom_args = parser.parse_args(args=rclpy.utilities.remove_ros_args(args=sys.argv)[1:])
+
+    print('Starting offboard control node with custom parameters...')
+    
+    # 4. 将解析后的参数传入节点
+    offboard_control = OffboardControl(args=custom_args)
+
     try:
         rclpy.spin(offboard_control)
     except KeyboardInterrupt:
         print("程序被用户中断 (Ctrl+C)")
     finally:
-        # 确保节点在退出时被正确销毁，从而触发我们的清理逻辑
+        print("Shutting down the node...")
         offboard_control.destroy_node()
         rclpy.shutdown()
 
