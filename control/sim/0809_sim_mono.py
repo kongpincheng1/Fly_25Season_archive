@@ -37,7 +37,7 @@ class MissionState(Enum):
     START = 0
     TAKING_OFF = 1
     GLOBAL_SEARCH = 2
-    PRE_TARGETING_CYCLE = 2.5
+    
     TARGETING_CYCLE = 3
     
     TIMEOUT_DROP = 8  # <<< 新增的状态
@@ -157,7 +157,7 @@ class OffboardControl(Node):
 
         ### 新增: 投放后等待的状态 ###
         self.is_waiting_post_drop = False
-        self.post_drop_delay = 1.0 # 从参数获取
+        self.post_drop_delay = args.post_drop_delay # 从参数获取
         self.post_drop_start_time = None
 
         # Initialize variables
@@ -165,12 +165,10 @@ class OffboardControl(Node):
         self.vehicle_local_position = VehicleLocalPosition()
         self.vehicle_status = VehicleStatus()
         
-
         self.target_position = None
         self.last_found_x_NED = None
         self.last_found_y_NED = None
         self.last_found_z_NED = None
-
 
         #起飞高度
         self.takeoff_height = args.takeoff_height
@@ -180,9 +178,6 @@ class OffboardControl(Node):
         self.align_maxstep = args.align_maxstep
         self.afterAlign_descentHeight = args.descent_height
         self.global_search_height = args.search_height
-        self.proactive_search_distance = args.proactive_search_dist
-
-        
 
         # <<< 新增：从命令行参数获取超时和延迟设置 >>>
         self.drop_phase_timeout = args.drop_phase_timeout
@@ -210,21 +205,15 @@ class OffboardControl(Node):
         self.drop_phase_start_time = None
         self.second_align_start_timestamp = None
         self.first_align_start_timestamp = None
-        self.search1_phase_start_time = None
-        self.search2_phase_start_time = None
+        
         self.timeout_drop_start_time = None
-        self.switch_to_offboard_start_time = None
-        self.prepare_offboard_start_time = None
-        self.first_drop_delay = None
-
+        
+        
         self.takeoff_target_height = None
         self.is_ReadyToTakeoff = False
         self.is_AtTakeoffHeight = False
         self.is_AtDropArea = False
         self.is_FinishDrop = False
-
-
-        self.Is_Descending_to_depth_camera_height = False
 
         self.droping_x = None
         self.droping_y = None
@@ -232,8 +221,8 @@ class OffboardControl(Node):
 
         # 新增日志计数器，用于减少日志输出频率
         self.log_counter = 0
-        self.timeout_drop_count = 0
-        self.timeout_drop_delay = 1.0
+        
+        self.timeout_drop_delay = args.timeout_drop_delay
 
         self.first_alignment_complete = False
         self.second_alignment_complete = False
@@ -246,11 +235,9 @@ class OffboardControl(Node):
         
         ### 新增: 用于稳定建图的数据收集变量 ###
         self.map_data_collection = []  # 存储多帧的坐标地图
-        self.is_confirming_map = False # 是否进入了地图确认阶段
-        self.search_confirmation_frames = 20 # 从参数获取
 
         #==================投水状态机=================
-        self.servo_step_delay = 0.1  # 每个舵机动作之间的延迟（秒），可以根据实际情况调整
+        self.servo_step_delay = args.servo_step_delay  # 每个舵机动作之间的延迟（秒），可以根据实际情况调整
         self.current_dropping_state = {1: DroppingState.IDLE, 2: DroppingState.IDLE}
         self.last_servo_command_time = {1: None, 2: None}
 
@@ -267,18 +254,25 @@ class OffboardControl(Node):
         # 写入表头
         self.pixel_log_writer.writerow(['timestamp', 'target_x', 'target_y', 'bucket_type', 'alignment_stage'])
         self.get_logger().info(f"日志文件已创建并打开: {self.pixel_log_path}")
+        # ===========================================================================
 
         # Create a timer to publish control commands
         self.dt = args.timer_period             # 控制周期 (秒) - 与timer频率一致
         self.control_timer = self.create_timer(self.dt, self.control_timer_callback)
         
         # 创建一个新的、较慢的视觉处理定时器
-        self.vision_processing_period = 0.1 # 10Hz, 可根据设备性能调整
+        self.vision_processing_period = args.vision_timer_period # 10Hz, 可根据设备性能调整
         self.vision_timer = self.create_timer(self.vision_processing_period, self.vision_timer_callback)
         
         # 创建一个线程安全的变量来存储视觉结果
         self.latest_vision_info = []
         self.latest_annotated_frame = None
+        # 起飞高度判断阈值
+        self.takeoff_threshold = args.takeoff_threshold
+        # 向前飞行到达点阈值
+        self.nav_threshold = args.nav_threshold
+        # 全局搜索到达点阈值
+        self.target_approach_threshold = args.target_approach_threshold
 
 
         #初始化位置判断器
@@ -325,21 +319,6 @@ class OffboardControl(Node):
         self.max_integral = self.epsilon  # 积分限幅值 - 可调参数
         # =========================================
 
-        # ========== 目标像素坐标日志自动生成带时间戳的文件 ==========
-        # 生成带时间戳的日志目录和文件名
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        log_dir = '/home/kpc/flylogs'  # 日志目录
-        log_filename = f'bucket_pixel_log_{timestamp}.csv'  # 带时间戳的文件名
-        os.makedirs(log_dir, exist_ok=True)
-        self.pixel_log_path = os.path.join(log_dir, log_filename)
-        
-        # 创建CSV文件并写入表头
-        with open(self.pixel_log_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['timestamp', 'target_x', 'target_y', 'bucket_type', 'alignment_stage'])
-        
-        self.get_logger().info(f"日志文件已创建: {self.pixel_log_path}")
-        # =========================================
 
 
     # +++ (新增的回调函数) +++
@@ -553,7 +532,7 @@ class OffboardControl(Node):
         # fly_to_position_FRD2NED 会自动使用 self.initial_x, self.initial_y, self.init_yaw
         self.fly_to_position_FRD2NED(0.0, 0.0, self.takeoff_target_height)
 
-    def takeoff_height_check(self, threshold=0.22):
+    def takeoff_height_check(self):
         """
         检查是否到达相对目标高度
         :param threshold: 高度误差阈值
@@ -567,21 +546,21 @@ class OffboardControl(Node):
         # 为了减少日志输出，只有每隔一定周期时才打印此日志
         if self.log_counter % 10 == 0:
             self.get_logger().info(f"当前高度：{current_height:.2f} 米，目标高度：{self.takeoff_target_height:.2f} 米，高度误差：{height_error:.2f} 米")
-        if height_error < threshold:
+        if height_error < self.takeoff_threshold:
             self.is_AtTakeoffHeight = True
 
     def fly_forward(self, x):
         """Fly forward to the drop area."""
         self.DropArea_x, self.DropArea_y = self.fly_to_position_FRD2NED(x, 0, self.takeoff_target_height)
         
-    def fly_forward_check(self, threshold=0.2):
+    def fly_forward_check(self):
         """Check if the drone has reached the drop area."""
         current_x = self.vehicle_local_position.x
         current_y = self.vehicle_local_position.y
         error = math.sqrt((current_x - self.DropArea_x)**2 + (current_y - self.DropArea_y)**2)
         if self.log_counter % 10 == 0:
             self.get_logger().info(f"--当前x：{current_x:.2f},y:{current_y:.2f}米，--目标x：{self.DropArea_x:.2f} 米，y:{self.DropArea_y:.2f},--误差：{error:.2f} 米")
-        if error < threshold:
+        if error < self.nav_threshold:
             self.is_AtDropArea = True
     
     def first_alignment_check(self, target_x, target_y):
@@ -986,14 +965,6 @@ class OffboardControl(Node):
             self.get_logger().error("图像话题已超时！检查桥接或仿真是否正常。")
             return
 
-        # 使用最新接收到的帧进行处理
-        frame = self.latest_frame.copy() # 创建一个副本以防在处理时被覆盖
-        annotated_frame = frame.copy()
-        cv2.putText(annotated_frame, f"State: {self.mission_state.name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
-        # +++ (新代码结束) +++
-        
-
 
         #进入offboard前发布位置控制点
         
@@ -1114,7 +1085,7 @@ class OffboardControl(Node):
                         else:
                             self.mission_state = MissionState.TARGETING_CYCLE
                             self.is_navigating_to_target = True
-                            self.pre_targeting_start_time = self.get_clock().now()
+
                         return
                 
             
@@ -1139,7 +1110,7 @@ class OffboardControl(Node):
                         
                         # 检查是否到达
                         dist_err = math.hypot(self.vehicle_local_position.x - target_x, self.vehicle_local_position.y - target_y)
-                        if dist_err < 0.3: # 到达阈值
+                        if dist_err < self.target_approach_threshold: # 到达阈值
                             self.get_logger().info(f"已到达 '{current_target_name}' 上方，准备下降。")
                             self.is_navigating_to_target = False
                             self.is_final_aligning = True
@@ -1299,8 +1270,7 @@ def main(args=None) -> None:
    
     parser.add_argument('--align-maxstep', type=float, default=0.2,
                         help='Maximum step size for each alignment adjustment.')
-    parser.add_argument('--proactive-search-dist', type=float, default=0.6,
-                        help='Distance to move sideways for proactive search.')
+
     
     # <<< 新增：在这里为 AlignmentChecker 添加参数 >>>
     parser.add_argument('--first-align-threshold', type=float, default=0.15,
@@ -1340,6 +1310,9 @@ def main(args=None) -> None:
      # --- 定时器参数 ---
     parser.add_argument('--timer-period', type=float, default=0.03,
                         help='定时器周期 (秒), 这也决定了PID控制中的 dt。默认: 0.03s (约33Hz).')
+    parser.add_argument('--vision-timer-period', type=float, default=0.1,
+                        help='定时器周期 (秒), 默认: 0.1s (10Hz).')
+
 
     # --- PID 核心参数 ---
     parser.add_argument('--kp', type=float, default=0.9911,
@@ -1354,6 +1327,20 @@ def main(args=None) -> None:
                         help='PID控制器 - 积分项的最大限制值 (防止积分饱和)。默认: 0.2.')
     
     parser.add_argument('--tracking-buffer', type=int, default=30, help='Number of frames for tracking history.')
+
+    parser.add_argument('--post-drop-delay', type=float, default=1.0,
+                        help='每次投放后悬停等待的时间（秒）。')
+    parser.add_argument('--timeout-drop-delay', type=float, default=1.0,
+                        help='在超时强制投放流程中，两次投放之间的最小间隔（秒）。')
+    parser.add_argument('--servo-step-delay', type=float, default=0.1,
+                        help='舵机每个动作之间的延迟时间（秒）。')
+    
+    parser.add_argument('--takeoff-threshold', type=float, default=0.22,
+                        help='判断无人机到达起飞高度的误差阈值（米）。')
+    parser.add_argument('--nav-threshold', type=float, default=0.2,
+                        help='判断无人机到达导航点（如投水区）的误差阈值（米）。')
+    parser.add_argument('--target-approach-threshold', type=float, default=0.3,
+                        help='判断无人机飞到目标上方，可以开始精确对准的误差阈值（米）。')
     # --- 选择投放桶 --- 
     parser.add_argument('--target-order', 
                         type=int,  # 关键：将类型改为整数
