@@ -23,6 +23,7 @@ setup(
             'fly = control.latest_single_drop:main',
             'pub = control.sim_pub:main',
             'mul = control.test_mulitiDrop:main',
+            'test = control.sim.0809_sim_mono:main',
         ],
     },
 )
