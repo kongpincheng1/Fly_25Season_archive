@@ -254,10 +254,33 @@ class OffboardControl(Node):
         self.current_dropping_state = {1: DroppingState.IDLE, 2: DroppingState.IDLE}
         self.last_servo_command_time = {1: None, 2: None}
 
+        # ========== 目标像素坐标日志 ==========
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        log_dir = '/home/kpc/flylogs'
+        log_filename = f'bucket_pixel_log_{timestamp}.csv'
+        os.makedirs(log_dir, exist_ok=True)
+        self.pixel_log_path = os.path.join(log_dir, log_filename)
+
+        # 打开文件并保留文件句柄和writer对象
+        self.pixel_log_file = open(self.pixel_log_path, 'w', newline='', encoding='utf-8')
+        self.pixel_log_writer = csv.writer(self.pixel_log_file)
+        # 写入表头
+        self.pixel_log_writer.writerow(['timestamp', 'target_x', 'target_y', 'bucket_type', 'alignment_stage'])
+        self.get_logger().info(f"日志文件已创建并打开: {self.pixel_log_path}")
+
         # Create a timer to publish control commands
         self.dt = args.timer_period             # 控制周期 (秒) - 与timer频率一致
-        self.timer = self.create_timer(self.dt, self.timer_callback)
+        self.control_timer = self.create_timer(self.dt, self.control_timer_callback)
         
+        # 创建一个新的、较慢的视觉处理定时器
+        self.vision_processing_period = 0.1 # 10Hz, 可根据设备性能调整
+        self.vision_timer = self.create_timer(self.vision_processing_period, self.vision_timer_callback)
+        
+        # 创建一个线程安全的变量来存储视觉结果
+        self.latest_vision_info = []
+        self.latest_annotated_frame = None
+
+
         #初始化位置判断器
         self.initPositionChecker = DronePositionChecker(
             logger_func=self.get_logger().info,
@@ -425,6 +448,10 @@ class OffboardControl(Node):
         # 清理视觉控制器（保存视频）
         if self.vision_controller:
             self.vision_controller.cleanup()
+        # 关闭日志文件
+        if hasattr(self, 'pixel_log_file') and not self.pixel_log_file.closed:
+            self.pixel_log_file.close()
+            self.get_logger().info("像素日志文件已关闭。")
         # # 清理摄像头
         # if self.cap and self.cap.isOpened():
         #     self.cap.release()
@@ -717,14 +744,12 @@ class OffboardControl(Node):
       
         if self.target_position:
             # ========== pid控制实现，记录目标像素坐标 ========== 
-            import time
-            with open(self.pixel_log_path, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    time.time(),
-                    self.target_position.x,
-                    self.target_position.y
-                ])
+            self.pixel_log_writer.writerow([
+        time.time(),
+        self.target_position.x,
+        self.target_position.y,
+        # 'bucket_type' 和 'alignment_stage' 你可以根据当前状态添加
+    ])
             # ========== 原有控制逻辑 ==========
             # 获取当前位置
             current_xned, current_yned = self.vehicle_local_position.x, self.vehicle_local_position.y
@@ -926,8 +951,9 @@ class OffboardControl(Node):
         self.get_logger().info("最终任务地图构建完成。")
     
     #定时器
-    def timer_callback(self) -> None:
+    def control_timer_callback(self) -> None:
         """Callback function for the timer."""
+        timer_start = self.get_clock().now()
         self.publish_offboard_control_heartbeat_signal()
         
         if not self.is_vision_ready:
@@ -1064,9 +1090,7 @@ class OffboardControl(Node):
                 if self.mission_state == MissionState.GLOBAL_SEARCH:
                     
                     # 开启usb摄像头识别
-                    self.current_vision_info, annotated_frame = self.vision_controller.process_frame(
-            self.latest_frame.copy(), self.vehicle_local_position.z - (self.initial_z or 0)
-        )
+                    self.current_vision_info = self.latest_vision_info
                    
                     
                     #启动全局搜索计时器
@@ -1201,12 +1225,50 @@ class OffboardControl(Node):
         else:
             self.get_logger().info("启动offboard模式失败")
             
-        if self.offboard_setpoint_counter < 30:
-            self.offboard_setpoint_counter += 1
         
-        cv2.imshow("Drone View", annotated_frame)
-        cv2.waitKey(1)
+        self.offboard_setpoint_counter += 1
         
+        # =================== 显示图像 ===================
+    # 显示由视觉定时器生成的最新标注图像
+        if self.latest_annotated_frame is not None:
+            cv2.imshow("Drone View", self.latest_annotated_frame)
+            cv2.waitKey(1)
+        elasped_timer_time = (self.get_clock().now() - timer_start).nanoseconds / 1e9
+        if self.offboard_setpoint_counter % 50 == 0:
+            self.get_logger().info(f"控制循环花费时间：{elasped_timer_time:.5f}")
+        
+    def vision_timer_callback(self):
+        """
+        这个回调以较低频率运行，专门处理耗时的视觉任务。
+        """
+        timer_start = self.get_clock().now()
+        if not self.is_vision_ready or self.latest_frame is None:
+            return
+
+        # 复制帧以进行处理
+        frame_to_process = self.latest_frame.copy()
+        
+        if self.mission_state == MissionState.GLOBAL_SEARCH:
+            # 核心视觉处理
+            current_altitude = self.vehicle_local_position.z - (self.initial_z or 0)
+            vision_info, annotated_frame = self.vision_controller.process_frame(
+                frame_to_process, current_altitude
+            )
+
+            # with self.vision_lock: # 如果使用多线程执行器，需要加锁
+            self.latest_vision_info = vision_info
+            
+            # 也更新用于显示的图像
+            cv2.putText(annotated_frame, f"State: {self.mission_state.name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            self.latest_annotated_frame = annotated_frame
+        else:
+            cv2.putText(frame_to_process, f"State: {self.mission_state.name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            self.latest_annotated_frame = frame_to_process
+
+        elasped_timer_time = (self.get_clock().now() - timer_start).nanoseconds / 1e9
+        if self.offboard_setpoint_counter % 50 ==0:
+            self.get_logger().info(f"视觉循环花费时间：{elasped_timer_time:.5f}")
+
 
 def main(args=None) -> None:
     print('Starting offboard control node...')
