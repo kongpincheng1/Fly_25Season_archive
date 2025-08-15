@@ -25,6 +25,14 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from rclpy.qos import qos_profile_sensor_data
 
+class DroppingState(Enum):
+    IDLE = 0
+    STEP_1_COMMANDED = 1
+    STEP_2_COMMANDED = 2
+    STEP_3_COMMANDED = 3
+    STEP_4_COMMANDED = 4
+    COMPLETED = 5
+
 class MissionState(Enum):
     START = 0
     TAKING_OFF = 1
@@ -145,6 +153,8 @@ class OffboardControl(Node):
         self.is_descending_for_drop = False
         self.is_final_aligning = False
 
+        self.is_drop_initiated_for_current_target = False
+
         ### 新增: 投放后等待的状态 ###
         self.is_waiting_post_drop = False
         self.post_drop_delay = 1.0 # 从参数获取
@@ -239,6 +249,10 @@ class OffboardControl(Node):
         self.is_confirming_map = False # 是否进入了地图确认阶段
         self.search_confirmation_frames = 20 # 从参数获取
 
+        #==================投水状态机=================
+        self.servo_step_delay = 0.1  # 每个舵机动作之间的延迟（秒），可以根据实际情况调整
+        self.current_dropping_state = {1: DroppingState.IDLE, 2: DroppingState.IDLE}
+        self.last_servo_command_time = {1: None, 2: None}
 
         # Create a timer to publish control commands
         self.dt = args.timer_period             # 控制周期 (秒) - 与timer频率一致
@@ -316,6 +330,9 @@ class OffboardControl(Node):
             self.frame_received_time = self.get_clock().now()
         except Exception as e:
             self.get_logger().error(f"无法转换图像: {e}")
+            
+
+
 
     def target_position_callback(self, msg: Point):
         """Callback function for receiving target position."""
@@ -430,36 +447,71 @@ class OffboardControl(Node):
     #             match = re.search(r"(/dev/video\d+)", line)
     #             if match: return match.group(1)
     #     return None
-
-    def execute_visual_command(self, command):
-        """根据视觉指令来控制无人机"""
-        if command is None:
-            return
-
-        # 简单的比例控制，将指令转换为小的位置增量
-        step_size_xy = 0.3  # 水平移动步长
-        step_size_z = 0.0   # 这里我们只做水平调整
-
-        current_x, current_y = self.coordinate_NED2FRD(self.vehicle_local_position.x, self.vehicle_local_position.y)
-        
-        delta_x, delta_y = 0.0, 0.0
-        if "向右平移" in command: delta_y = step_size_xy  
-        if "向左平移" in command: delta_y = -step_size_xy
-        if "向前平移" in command: delta_x = step_size_xy
-        if "向后平移" in command: delta_x = -step_size_xy
-
-        # 计算新的FRD目标点
-        target_x_frd = current_x + delta_x
-        target_y_frd = current_y + delta_y
-        
-        # 转换回NED并发布
-        target_x_ned, target_y_ned = self.coordinate_FRD2NED(target_x_frd, target_y_frd)
-        self.publish_position_setpoint(target_x_ned, target_y_ned, self.global_search_target_z)    
+ 
     
-    def drop_payload(self,servo_1,servo_2):
-        self.servo_control.open_servo(servo_1,servo_2)
+    def drop_payload(self, drop_number: int):
+        """
+        启动指定编号的多步骤投水序列。
+        这个函数只负责启动，不负责管理过程。
+        """
+        if self.current_dropping_state[drop_number] == DroppingState.IDLE:
+            self.get_logger().info(f"启动第 {drop_number} 次投水序列...")
+            self.get_logger().info(f"第 {drop_number} 次投水 - 步骤 1: (0, 0)")
+            if drop_number == 1 :
+                self.servo_control.open_servo(0.0, 1.0)
+            elif drop_number ==2 :
+                self.servo_control.open_servo(0.0, -1.0)
+            self.current_dropping_state[drop_number] = DroppingState.STEP_1_COMMANDED
+            # 使用ROS 2的时钟
+            self.last_servo_command_time[drop_number] = self.get_clock().now()
 
-        self.get_logger().info("---------------Payload dropped.-------------------")
+    def manage_dropping_sequence(self, drop_number: int) -> bool:
+        """
+        非阻塞地管理投水过程，应该在 timer_callback 中被反复调用。
+        返回: True 如果序列完成，否则 False。
+        """
+        state = self.current_dropping_state[drop_number]
+        
+        if state == DroppingState.IDLE:
+            return False
+        if state == DroppingState.COMPLETED:
+            return True
+
+        elapsed_time = (self.get_clock().now() - self.last_servo_command_time[drop_number]).nanoseconds / 1e9
+        if elapsed_time < self.servo_step_delay:
+            return False
+
+        self.get_logger().info(f"第 {drop_number} 次投水 - 执行下一步...")
+
+        # 这里使用您在ServoTester中验证过的舵机指令
+        if state == DroppingState.STEP_1_COMMANDED:
+            if drop_number == 1:
+                self.servo_control.open_servo(0.0, 1.0)
+            else: # drop_number == 2
+                self.servo_control.open_servo(0.0, -1.0)
+            self.current_dropping_state[drop_number] = DroppingState.STEP_2_COMMANDED
+            self.last_servo_command_time[drop_number] = self.get_clock().now()
+        
+        elif state == DroppingState.STEP_2_COMMANDED:
+            self.servo_control.open_servo(0.0, 0.0)
+            self.current_dropping_state[drop_number] = DroppingState.STEP_3_COMMANDED
+            self.last_servo_command_time[drop_number] = self.get_clock().now()
+
+        elif state == DroppingState.STEP_3_COMMANDED:
+            if drop_number == 1:
+                self.servo_control.open_servo(1.0, 0.0)
+            else: # drop_number == 2
+                self.servo_control.open_servo(-1.0, 0.0)
+            self.current_dropping_state[drop_number] = DroppingState.STEP_4_COMMANDED
+            self.last_servo_command_time[drop_number] = self.get_clock().now()
+            
+        elif state == DroppingState.STEP_4_COMMANDED:
+            self.servo_control.open_servo(0.0, 0.0)
+            self.get_logger().info(f"第 {drop_number} 次投水序列完成。")
+            self.current_dropping_state[drop_number] = DroppingState.COMPLETED
+            return True
+            
+        return False
 
     def takeoff_relative(self): # 不再需要 relative_height 参数
         """
@@ -580,6 +632,8 @@ class OffboardControl(Node):
         self.is_navigating_to_target = False
         self.is_descending_for_drop = False
         self.is_final_aligning = False
+
+        self.is_drop_initiated_for_current_target = False
         
         # 增加投放计数和索引
         self.visited_targets_count += 1
@@ -606,26 +660,24 @@ class OffboardControl(Node):
             # 检查是否超时
             if elapsed_first_align_time > self.first_align_maxtime:
                 self.get_logger().warn(f"第一次对准超时 ({elapsed_first_align_time:.1f}s > {self.first_align_maxtime}s)，强制执行投放！")
-                
-                # 执行投放逻辑（与第二次对准超时投放逻辑相同）
-                if not self.Is_Finish_1st_Drop:
-                    self.drop_payload(-1.0, 1.0)
-                    self.get_logger().info("——————————————————————DROP (TIMEOUT - FIRST ALIGNMENT)————————————————————————")
-                    self.Is_Finish_1st_Drop = True
+                if not self.is_drop_initiated_for_current_target:
+                    # 执行投放逻辑（与第二次对准超时投放逻辑相同）
+                    if self.current_dropping_state[1] == DroppingState.IDLE and not self.Is_Finish_1st_Drop:
+                        self.drop_payload(1)
+                        self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
+                    elif self.current_dropping_state[2] == DroppingState.IDLE and self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop:
+                        self.drop_payload(2)
+                        self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
+                        
                     self.first_align_start_timestamp = None # 重置计时器
-                elif not self.Is_Finish_2nd_Drop: # 确保如果第一次投放已经发生，第二次也能被超时触发
-                    self.drop_payload(1.0, -1.0)
-                    self.get_logger().info("——————————————————————DROP (TIMEOUT - FIRST ALIGNMENT)————————————————————————")
-                    self.Is_Finish_2nd_Drop = True
-                    self.first_align_start_timestamp = None # 重置计时器
-                
-                self.droping_x = self.vehicle_local_position.x
-                self.droping_y = self.vehicle_local_position.y
-                self.droping_z = self.vehicle_local_position.z
-                
-                # 关键：强制设置第一次对准完成，以便任务流程能够继续
-                self.first_alignment_complete = True
-                self.second_alignment_checker.reset() # 第一次对准已“完成”（即使是超时），为第二次对准重置检查器
+                    
+                    self.droping_x = self.vehicle_local_position.x
+                    self.droping_y = self.vehicle_local_position.y
+                    self.droping_z = self.vehicle_local_position.z
+                    
+                    # 关键：强制设置第一次对准完成，以便任务流程能够继续
+                    self.first_alignment_complete = True
+                    self.second_alignment_checker.reset() # 第一次对准已“完成”（即使是超时），为第二次对准重置检查器
                 
                 return # 既然已经超时投放，直接结束本次函数调用
         
@@ -638,26 +690,26 @@ class OffboardControl(Node):
 
             # 计算已过时间
             elapsed_drop_time = (self.get_clock().now() - self.second_align_start_timestamp).nanoseconds / 1e9
-
+            
             # 检查是否超时
             if elapsed_drop_time > self.second_align_maxtime:
                 self.get_logger().warn(f"第二次对准超时 ({elapsed_drop_time:.1f}s > {self.second_align_maxtime}s)，强制执行投放！")
-                
-                # <<< 开始投放逻辑 (从原代码中移动至此) >>>
-                if not self.Is_Finish_1st_Drop:
-                    self.drop_payload(-1.0, 1.0)
-                    self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
-                    self.Is_Finish_1st_Drop = True
+                if not self.is_drop_initiated_for_current_target:
+                    # <<< 开始投放逻辑 (从原代码中移动至此) >>> tag:第二次对准超时投水
+                    if self.current_dropping_state[1] == DroppingState.IDLE and not self.Is_Finish_1st_Drop:
+                        self.drop_payload(1)
+                        self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
+                        
+                    elif self.current_dropping_state[2] == DroppingState.IDLE and self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop:
+                        self.drop_payload(2)
+                        self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
+                    
+                    
                     self.second_align_start_timestamp = None # 重置计时器
-                elif not self.Is_Finish_2nd_Drop:
-                    self.drop_payload(1.0, -1.0)
-                    self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
-                    self.Is_Finish_2nd_Drop = True
-                    self.second_align_start_timestamp = None # 重置计时器
-                
-                self.droping_x = self.vehicle_local_position.x
-                self.droping_y = self.vehicle_local_position.y
-                self.droping_z = self.vehicle_local_position.z
+                    
+                    self.droping_x = self.vehicle_local_position.x
+                    self.droping_y = self.vehicle_local_position.y
+                    self.droping_z = self.vehicle_local_position.z
                 # <<< 投放逻辑结束 >>>
 
                 return # 既然已经超时投放，直接结束本次函数调用
@@ -774,16 +826,16 @@ class OffboardControl(Node):
             self.target_position = None
             
             # ============== 投水逻辑 ==============
-            if self.first_alignment_complete and self.second_alignment_complete:
-                if not self.Is_Finish_1st_Drop:
-                    self.drop_payload(-1.0,1.0)
-                    self.get_logger().info("——————————————————————第一次投水————————————————————————")
-                    self.Is_Finish_1st_Drop = True
+            if self.first_alignment_complete and self.second_alignment_complete and not self.is_drop_initiated_for_current_target:
+    # 只负责启动，不设置完成标志
+                if self.current_dropping_state[1] == DroppingState.IDLE and not self.Is_Finish_1st_Drop:
+                    self.drop_payload(1) # 启动第一次投水
+                    self.is_drop_initiated_for_current_target = True
                     self.second_align_start_timestamp = None
-                elif self.visited_targets_count == 1 and not self.Is_Finish_2nd_Drop:
-                    self.drop_payload(1.0,-1.0)
-                    self.get_logger().info("——————————————————————第二次投水————————————————————————")
-                    self.Is_Finish_2nd_Drop = True
+                
+                elif self.current_dropping_state[2] == DroppingState.IDLE and self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop:
+                    self.drop_payload(2) # 启动第二次投水
+                    self.is_drop_initiated_for_current_target = True
                     self.second_align_start_timestamp = None
                 self.droping_x = self.vehicle_local_position.x
                 self.droping_y = self.vehicle_local_position.y
@@ -928,6 +980,24 @@ class OffboardControl(Node):
                 self.get_logger().info("try offboard")
 
         if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+
+            if self.current_dropping_state[1] != DroppingState.IDLE and not self.Is_Finish_1st_Drop:
+                is_done = self.manage_dropping_sequence(1)
+                if is_done:
+                    self.get_logger().info("第一次投水流程确认完成。")
+                    self.Is_Finish_1st_Drop = True
+                    # 记录投放位置等
+                    self.droping_x = self.vehicle_local_position.x
+                    self.droping_y = self.vehicle_local_position.y
+                    self.droping_z = self.vehicle_local_position.z
+
+            if self.current_dropping_state[2] != DroppingState.IDLE and not self.Is_Finish_2nd_Drop:
+                is_done = self.manage_dropping_sequence(2)
+                if is_done:
+                    self.get_logger().info("第二次投水流程确认完成。")
+                    self.Is_Finish_2nd_Drop = True
+                    # 更新任务完成标志
+                    self.is_FinishDrop = True
             
             
             if not self.is_ReadyToTakeoff:
@@ -1095,30 +1165,23 @@ class OffboardControl(Node):
 
                 elif self.mission_state == MissionState.TIMEOUT_DROP:
                     self.get_logger().info("正在执行超时强制投放流程...")
-                    
-                    # 1. 检查是否需要进行第一次投放
-                    if not self.Is_Finish_1st_Drop:
-                        self.get_logger().info("强制投放第一个载荷。")
-                        self.drop_payload(-1.0, 1.0)
-                        self.Is_Finish_1st_Drop = True
-                        
-                        # 记录投放时间，用于计算延迟
+                    if not self.Is_Finish_1st_Drop and self.current_dropping_state[1] == DroppingState.IDLE:
+                        self.get_logger().info("强制启动第一个载荷的投放序列。")
+                        self.drop_payload(1)
                         self.timeout_drop_start_time = self.get_clock().now()
-                        return # 返回，等待下个循环来检查延迟
 
-                    # 2. 如果第一个已投放，检查是否需要投放第二个
-                    if not self.Is_Finish_2nd_Drop:
-                        # 计算自第一次投放以来的时间
-                        elapsed_time = (self.get_clock().now() - self.timeout_drop_start_time).nanoseconds / 1e9
-                        
-                        if elapsed_time > self.timeout_drop_delay:
-                            self.get_logger().info("强制投放第二个载荷。")
-                            self.drop_payload(1.0, -1.0)
-                            self.Is_Finish_2nd_Drop = True
+                    # 启动第二次强制投放 (如果第一个已完成且第二个还没开始)
+                    if self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop and self.current_dropping_state[2] == DroppingState.IDLE:
+                        if self.timeout_drop_start_time is None:
+                            # 如果计时器未设置(说明超时发生在第一次投放完成后)，则立即设置它
+                            self.get_logger().warn("超时流程启动时，第一次投放已完成。立即启动第二次投放延迟计时。")
+                            self.timeout_drop_start_time = self.get_clock().now()
                         else:
-                            if self.log_counter % 10 == 0:
-                                self.get_logger().info(f"等待 {self.timeout_drop_delay}s 投放延迟... ({elapsed_time:.1f}s)")
-                    
+                            elapsed_time = (self.get_clock().now() - self.timeout_drop_start_time).nanoseconds / 1e9
+                            if elapsed_time > self.timeout_drop_delay:
+                                self.get_logger().info("强制启动第二个载荷的投放序列。")
+                                self.drop_payload(2)
+
                     # 3. 检查是否全部投放完毕
                     if self.Is_Finish_1st_Drop and self.Is_Finish_2nd_Drop:
                         self.get_logger().info("所有载荷均已强制投放，任务完成。")
