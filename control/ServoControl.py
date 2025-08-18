@@ -65,7 +65,7 @@ class ServoControl(Node):
 
         msg.target_system = 1
         msg.target_component = 1
-        msg.source_system = 255
+        msg.source_system = 255 
         msg.source_component = 1
         msg.from_external = True
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)

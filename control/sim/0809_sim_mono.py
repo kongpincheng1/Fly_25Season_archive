@@ -155,6 +155,8 @@ class OffboardControl(Node):
 
         self.is_drop_initiated_for_current_target = False
 
+        self.is_drop_area_calculated = False
+
         ### 新增: 投放后等待的状态 ###
         self.is_waiting_post_drop = False
         self.post_drop_delay = args.post_drop_delay # 从参数获取
@@ -549,19 +551,38 @@ class OffboardControl(Node):
         if height_error < self.takeoff_threshold:
             self.is_AtTakeoffHeight = True
 
-    def fly_forward(self, x):
-        """Fly forward to the drop area."""
-        self.DropArea_x, self.DropArea_y = self.fly_to_position_FRD2NED(x, 0, self.takeoff_target_height)
-        
-    def fly_forward_check(self):
-        """Check if the drone has reached the drop area."""
+    def calculate_drop_area_once(self, x):
+        """
+        仅计算一次投水区的NED坐标并存储。
+        这个函数只在状态切换时被调用一次。
+        """
+        # 使用 coordinate_FRD2NED 函数计算目标点，但不发布
+        self.DropArea_x, self.DropArea_y = self.coordinate_FRD2NED(x, 0)
+        self.get_logger().info(f"投水区目标点已计算 (NED): x={self.DropArea_x:.2f}, y={self.DropArea_y:.2f}")
+
+    def navigate_to_drop_area(self):
+        """
+        在每个循环中导航至投水区并检查是否到达。
+        这是一个闭环控制函数。
+        """
+        # 1. 持续发布飞向预定目标点的指令
+        # 目标高度保持在起飞高度
+        self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.takeoff_target_height)
+
+        # 2. 检查是否已经到达
         current_x = self.vehicle_local_position.x
         current_y = self.vehicle_local_position.y
         error = math.sqrt((current_x - self.DropArea_x)**2 + (current_y - self.DropArea_y)**2)
+
         if self.log_counter % 10 == 0:
-            self.get_logger().info(f"--当前x：{current_x:.2f},y:{current_y:.2f}米，--目标x：{self.DropArea_x:.2f} 米，y:{self.DropArea_y:.2f},--误差：{error:.2f} 米")
+            self.get_logger().info(f"导航至投水区... "
+                                   f"当前:({current_x:.2f}, {current_y:.2f}), "
+                                   f"目标:({self.DropArea_x:.2f}, {self.DropArea_y:.2f}), "
+                                   f"距离误差: {error:.2f} m")
+
         if error < self.nav_threshold:
             self.is_AtDropArea = True
+            self.get_logger().info("已到达投水区！")
     
     def first_alignment_check(self, target_x, target_y):
         """Check first alignment with the target."""
@@ -1034,8 +1055,13 @@ class OffboardControl(Node):
             if self.is_AtTakeoffHeight and not self.is_AtDropArea:
                 if self.log_counter % 10 == 0:
                     self.get_logger().info("执行步骤3,飞向投水区")
-                self.fly_forward(self.forward_x)
-                self.fly_forward_check()
+                if not self.is_drop_area_calculated:
+                    self.get_logger().info("执行步骤3, 计算投水区位置并开始导航...")
+                    self.calculate_drop_area_once(self.forward_x)
+                    self.is_drop_area_calculated = True
+
+                # 步骤2: 持续导航并检查是否到达
+                self.navigate_to_drop_area()
                 # self.is_AtDropArea = False #测试用
 
             if self.is_AtDropArea and not self.is_FinishDrop:
