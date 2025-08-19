@@ -876,7 +876,7 @@ class OffboardControl(Node):
             else:
                 if self.log_counter % 30 == 0:
                     self.get_logger().info("无目标记录，返回投水区域")
-                self.fly_to_position(self.DropArea_x, self.DropArea_y, self.takeoff_target_height)
+                self.fly_to_position(self.vehicle_local_position.x, self.vehicle_local_position.y, self.takeoff_target_height)
     
     
     def _calculate_and_store_average_map(self):
@@ -1210,14 +1210,14 @@ class OffboardControl(Node):
 
             if self.is_FinishDrop: 
                 self.get_logger().info("投放阶段任务完成。")
-                # self.start_mission()
-                # self.mission_state = MissionState.INMISSION
-                # if self.mission_state == MissionState.INMISSION:
-                #     if self.log_counter% 10 == 0:
-                #         self.get_logger().info(f"任务模式。")
-                self.fly_to_position(self.initial_x, self.initial_y, self.initial_z-5)
-                if self.log_counter% 10 == 0:
-                        self.get_logger().info(f"回到起飞点")
+                self.start_mission()
+                self.mission_state = MissionState.INMISSION
+                if self.mission_state == MissionState.INMISSION:
+                    if self.log_counter% 10 == 0:
+                        self.get_logger().info(f"任务模式。")
+                # self.fly_to_position(self.initial_x, self.initial_y, self.initial_z-5)
+                # if self.log_counter% 10 == 0:
+                #         self.get_logger().info(f"回到起飞点")
         
         else:
             self.get_logger().info("启动offboard模式失败")
@@ -1284,12 +1284,12 @@ def main(args=None) -> None:
     parser.add_argument('--camera-hint', type=str, default='imx577',
                         help='Hint to find the camera device name (e.g., "USB", "C920").')
     
-    parser.add_argument('--takeoff-height', type=float, default=-2.3,
+    parser.add_argument('--takeoff-height', type=float, default=-2.1,
                         help='Takeoff height in meters (negative value for altitude).')
     parser.add_argument('--descent-height', type=float, default=1.0,
                         help='Descent height after first alignment in meters (positive value).')
     
-    parser.add_argument('--forward-x', type=float, default=2.5,
+    parser.add_argument('--forward-x', type=float, default=32.5,
                         help='Forward distance to fly to the drop area in meters.')
     parser.add_argument('--search-height', type=float, default=-5.0,
                         help='Global search height in meters (negative value for altitude).')
