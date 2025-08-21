@@ -48,6 +48,12 @@ class OffboardControl(Node):
     def __init__(self,args) -> None:
         super().__init__('offboard_control_takeoff_and_land')
 
+        self.show_video = not args.headless  # 如果是headless模式，则不显示视频
+        if self.show_video:
+            self.get_logger().info("视频显示GUI已启用。")
+        else:
+            self.get_logger().info("已启用无头模式，将不显示视频GUI。")
+
         # Configure QoS profile for publishing and subscribing
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -400,7 +406,8 @@ class OffboardControl(Node):
         if self.cap and self.cap.isOpened():
             self.cap.release()
         # 关闭所有OpenCV窗口
-        cv2.destroyAllWindows()
+        if self.show_video:
+            cv2.destroyAllWindows()
         # 调用父类的方法完成ROS节点的销毁
         super().destroy_node()
         self.get_logger().info("清理完成，节点已关闭。")
@@ -1177,9 +1184,10 @@ class OffboardControl(Node):
         
         # =================== 显示图像 ===================
     # 显示由视觉定时器生成的最新标注图像
-        if self.latest_annotated_frame is not None:
-            cv2.imshow("Drone View", self.latest_annotated_frame)
-            cv2.waitKey(1)
+        if self.show_video:
+            if self.latest_annotated_frame is not None:
+                cv2.imshow("Drone View", self.latest_annotated_frame)
+                cv2.waitKey(1)
         elasped_timer_time = (self.get_clock().now() - timer_start).nanoseconds / 1e9
         if self.offboard_setpoint_counter % 50 == 0:
             self.get_logger().info(f"控制循环花费时间：{elasped_timer_time:.5f}s")
@@ -1225,9 +1233,9 @@ def main(args=None) -> None:
     parser = argparse.ArgumentParser(description="Offboard control script for PX4 drone mission.")
     
     # 添加你想通过命令行配置的参数
-    parser.add_argument('--model-path', type=str, default='/home/kpc/weights/best_sim.pt',
+    parser.add_argument('--model-path', type=str, default='/home/weights/0728.engine',
                         help='Path to the object detection model file.')
-    parser.add_argument('--photo-path', type=str, default='/home/kpc/image_recodes',
+    parser.add_argument('--photo-path', type=str, default='/home/image_recodes',
                         help='Base directory to save captured photos.')
     parser.add_argument('--video-path', type=str, default='/home/video_recodes',
                         help='Base directory to save recorded mission videos.')
@@ -1284,7 +1292,7 @@ def main(args=None) -> None:
                     help='触发距离的阈值.')
     
      # --- 定时器参数 ---
-    parser.add_argument('--timer-period', type=float, default=0.03,
+    parser.add_argument('--timer-period', type=float, default=0.04,
                         help='定时器周期 (秒), 这也决定了PID控制中的 dt。默认: 0.03s (约33Hz).')
     parser.add_argument('--vision-timer-period', type=float, default=0.1,
                         help='定时器周期 (秒), 默认: 0.1s (10Hz).')
@@ -1317,6 +1325,10 @@ def main(args=None) -> None:
                         help='判断无人机到达导航点（如投水区）的误差阈值（米）。')
     parser.add_argument('--target-approach-threshold', type=float, default=0.3,
                         help='判断无人机飞到目标上方，可以开始精确对准的误差阈值（米）。')
+    
+    parser.add_argument('--headless', action='store_true',
+                        help='以无头模式运行，不显示摄像头的GUI窗口。')
+    
     # --- 选择投放桶 --- 
     parser.add_argument('--target-order', 
                         type=int,  # 关键：将类型改为整数
