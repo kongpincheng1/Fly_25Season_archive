@@ -1,3 +1,6 @@
+'''
+这个代码和上一目录的visual_servoing一样。
+'''
 import cv2
 from ultralytics import YOLO
 from enum import Enum
