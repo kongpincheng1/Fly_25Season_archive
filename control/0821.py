@@ -104,8 +104,8 @@ class OffboardControl(Node):
             enable_photo_capture=False,
             photo_save_path=unique_photo_path, 
             photo_capture_interval=10,
-            # <<< 新增：启用并配置视频录制 >>>
-            enable_video_recording=False,           # 设置为 True 来开启录制
+            # <<< 修改：现在由命令行参数控制 >>>
+            enable_video_recording=args.record_video, # 设置为 True 来开启录制
             video_save_path=base_video_path,       # 视频保存的目录
             video_filename=unique_video_filename,  # 带有时间戳的唯一文件名
             video_fps=30.0,
@@ -1329,6 +1329,10 @@ def main(args=None) -> None:
     parser.add_argument('--headless', action='store_true',
                         help='以无头模式运行，不显示摄像头的GUI窗口。')
     
+    # <<< 新增：用于控制视频录制的参数 >>>
+    parser.add_argument('--record-video', action='store_true',
+                        help='启用任务视频录制功能。')
+    
     # --- 选择投放桶 --- 
     parser.add_argument('--target-order', 
                         type=int,  # 关键：将类型改为整数
@@ -1374,8 +1378,31 @@ def main(args=None) -> None:
     custom_args.target_order = translated_order_strings
     
     # =================================================================
-
-    print(f"任务将按照以下顺序执行投放: {custom_args.target_order}")
+    # ##########################################################################
+    # ################          新增的任务参数总览打印模块          ################
+    # ##########################################################################
+    print("\n================== 任务参数总览 ==================")
+    print(f"  - 模型文件: {custom_args.model_path}")
+    print(f"  - 目标投放顺序: {custom_args.target_order}")
+    print("------------------ 飞行参数 ------------------")
+    print(f"  - 计划向前飞行距离: {custom_args.forward_x} 米")
+    print(f"  - 预设起飞高度: {abs(custom_args.takeoff_height)} 米 (相对于初始位置)")
+    print(f"  - 全局搜索高度: {abs(custom_args.search_height)} 米 (相对于初始位置)")
+    print(f"  - 首次对准后下降: {custom_args.descent_height} 米")
+    print("------------------ 超时设置 ------------------")
+    print(f"  - 整体投放阶段超时: {custom_args.drop_phase_timeout} 秒")
+    print(f"  - 全局搜索阶段超时: {custom_args.search_timeout} 秒")
+    print(f"  - 首次对准阶段超时: {custom_args.first_align_maxtime} 秒")
+    print(f"  - 第二次对准阶段超时: {custom_args.second_align_maxtime} 秒")
+    print("------------------ 对准阈值 ------------------")
+    print(f"  - 首次对准稳定阈值: {custom_args.first_align_threshold} 米, 稳定时长: {custom_args.first_align_time_window} 秒")
+    print(f"  - 第二次对准稳定阈值: {custom_args.second_align_threshold} 米, 稳定时长: {custom_args.second_align_time_window} 秒")
+    print("------------------ 模式设置 ------------------")
+    print(f"  - 视频录制: {'已启用' if custom_args.record_video else '已禁用'}")
+    print(f"  - 无头模式 (不显示GUI): {'是' if custom_args.headless else '否'}")
+    print("==================================================\n")
+    # ##########################################################################
+    
     print('Starting offboard control node with custom parameters...')
     
     # 4. 将解析后的参数传入节点
