@@ -21,9 +21,7 @@ import csv
 import argparse # <<< 新增
 import sys      # <<< 新增
 import numpy as np
-from sensor_msgs.msg import Image
-from cv_bridge import CvBridge
-from rclpy.qos import qos_profile_sensor_data
+
 
 class DroppingState(Enum):
     IDLE = 0
@@ -57,6 +55,12 @@ class OffboardControl(Node):
 
     def __init__(self,args) -> None:
         super().__init__('offboard_control_takeoff_and_land')
+
+        self.show_video = not args.headless  # 如果是headless模式，则不显示视频
+        if self.show_video:
+            self.get_logger().info("视频显示GUI已启用。")
+        else:
+            self.get_logger().info("已启用无头模式，将不显示视频GUI。")
 
         # Configure QoS profile for publishing and subscribing
         qos_profile = QoSProfile(
@@ -92,17 +96,11 @@ class OffboardControl(Node):
         self.dist_coeffs = np.array([0.0, 0.0, 0.0, 0.0, 0.0]) # 假设畸变可以忽略
         self.get_logger().info("相机内参已配置。")
 
-        # <<< 新增：从参数获取仿真摄像头话题 >>>
-        self.declare_parameter('sim_camera_topic', '/camera') # 默认订阅 /camera
-        sim_camera_topic = self.get_parameter('sim_camera_topic').get_parameter_value().string_value
-        
-        
         base_photo_path = args.photo_path
         base_video_path = args.video_path
         
         run_timestamp = time.strftime("%Y%m%d_%H%M%S")
         unique_photo_path = os.path.join(base_photo_path, f"run_{run_timestamp}")
-        self.get_logger().info(f"This run's photos will be saved to: {unique_photo_path}")
         unique_video_filename = f"mission_{run_timestamp}.avi" # AVI格式与MJPG编码器配合良好        
         
         # === 初始化视觉部分 (带视频录制功能) ===
@@ -114,33 +112,21 @@ class OffboardControl(Node):
             enable_photo_capture=False,
             photo_save_path=unique_photo_path, 
             photo_capture_interval=10,
-            # <<< 新增：启用并配置视频录制 >>>
-            enable_video_recording=False,           # 设置为 True 来开启录制
+            # <<< 修改：现在由命令行参数控制 >>>
+            enable_video_recording=args.record_video, # 设置为 True 来开启录制
             video_save_path=base_video_path,       # 视频保存的目录
             video_filename=unique_video_filename,  # 带有时间戳的唯一文件名
             video_fps=30.0,
             tracking_buffer_size=args.tracking_buffer                         # 视频帧率 (与你的timer频率匹配)
         )
         
-        # device_path = self.find_video_device_by_name(args.camera_hint)
-        # self.cap = cv2.VideoCapture(device_path if device_path else 0)        
-        # if not self.cap.isOpened():
-        #     self.get_logger().error("无法打开摄像头！")
-        #     rclpy.shutdown()
+        device_path = self.find_video_device_by_name(args.camera_hint)
+        self.cap = cv2.VideoCapture(device_path if device_path else 0)        
+        if not self.cap.isOpened():
+            self.get_logger().error("无法打开摄像头！")
+            rclpy.shutdown()
 
-        self.bridge = CvBridge()
         self.latest_frame = None  # 用于存储最新接收到的图像帧
-        self.frame_received_time = self.get_clock().now() # 用于检查图像是否过时
-        
-        # 创建图像话题订阅者
-        self.image_subscriber = self.create_subscription(
-            Image,
-            sim_camera_topic, # 订阅来自仿真的图像话题
-            self.image_callback,
-            qos_profile_sensor_data  # 使用 sensor_data QoS 配置
-        )
-        self.get_logger().info(f"订阅仿真摄像头话题: '{sim_camera_topic}'")
-
         
         self.is_vision_ready = False
 
@@ -200,15 +186,6 @@ class OffboardControl(Node):
 
         self.trigger_distance = args.trigger_distance
         self.position_threshold = args.position_threshold
-
-
-        # <<< 新增：从命令行参数初始化侦察任务参数 >>>
-        self.recon_trigger_distance = args.recon_trigger_distance
-        self.recon_search_height = args.recon_search_height
-        self.recon_search_timeout = args.recon_search_timeout
-        self.recon_hover_time = args.recon_hover_time
-        self.recon_nav_threshold = args.recon_nav_threshold
-
 
         self.global_search_target_z = None
 
@@ -349,17 +326,6 @@ class OffboardControl(Node):
 
 
 
-    # +++ (新增的回调函数) +++
-    def image_callback(self, msg: Image):
-        """
-        接收来自仿真摄像头的图像消息，并将其转换为OpenCV格式。
-        """
-        try:
-            # 将 ROS Image 消息转换为 OpenCV 图像 (bgr8 是标准彩色格式)
-            self.latest_frame = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-            self.frame_received_time = self.get_clock().now()
-        except Exception as e:
-            self.get_logger().error(f"无法转换图像: {e}")
             
 
 
@@ -396,7 +362,7 @@ class OffboardControl(Node):
         """Switch to offboard mode."""
         self.publish_vehicle_command(
             VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=1.0, param2=6.0)
-        self.get_logger().info("Switching to offboard mode")
+        # self.get_logger().info("Switching to offboard mode")
 
     def start_mission(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, param1=4.0, param2=3.0)
@@ -460,27 +426,28 @@ class OffboardControl(Node):
             self.pixel_log_file.close()
             self.get_logger().info("像素日志文件已关闭。")
         # # 清理摄像头
-        # if self.cap and self.cap.isOpened():
-        #     self.cap.release()
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
         # 关闭所有OpenCV窗口
-        cv2.destroyAllWindows()
+        if self.show_video:
+            cv2.destroyAllWindows()
         # 调用父类的方法完成ROS节点的销毁
         super().destroy_node()
         self.get_logger().info("清理完成，节点已关闭。")
     
-    # def find_video_device_by_name(self,name_hint="USB Camera"):
-    # # (This function remains unchanged)
-    #     try:
-    #         result = subprocess.run(["v4l2-ctl", "--list-devices"], capture_output=True, text=True, check=True)
-    #     except (FileNotFoundError, subprocess.CalledProcessError): return None
-    #     lines = result.stdout.splitlines()
-    #     matched_device_name = False
-    #     for line in lines:
-    #         if name_hint in line: matched_device_name = True
-    #         elif matched_device_name and "/dev/video" in line:
-    #             match = re.search(r"(/dev/video\d+)", line)
-    #             if match: return match.group(1)
-    #     return None
+    def find_video_device_by_name(self,name_hint="USB Camera"):
+    # (This function remains unchanged)
+        try:
+            result = subprocess.run(["v4l2-ctl", "--list-devices"], capture_output=True, text=True, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError): return None
+        lines = result.stdout.splitlines()
+        matched_device_name = False
+        for line in lines:
+            if name_hint in line: matched_device_name = True
+            elif matched_device_name and "/dev/video" in line:
+                match = re.search(r"(/dev/video\d+)", line)
+                if match: return match.group(1)
+        return None
  
     
     def drop_payload(self, drop_number: int):
@@ -901,7 +868,7 @@ class OffboardControl(Node):
                 self.fly_to_position(self.last_found_x_NED, self.last_found_y_NED, self.last_found_z_NED)
             else:
                 if self.log_counter % 30 == 0:
-                    self.get_logger().info("无目标记录，返回投水区域")
+                    self.get_logger().info("无目标记录，原地等待")
                 self.fly_to_position(self.vehicle_local_position.x, self.vehicle_local_position.y, self.takeoff_target_height)
     
     
@@ -1029,33 +996,20 @@ class OffboardControl(Node):
         self.log_counter += 1
         
         # --- 视觉处理部分 ---
-        # ret, frame = self.cap.read()
-        # if not ret:
-        #     self.get_logger().warn("无法捕获图像")
-        #     return
-
-        
-
-        # +++ (以下是新的替换代码) +++
-        if self.latest_frame is None:
-            self.get_logger().warn("尚未接收到任何图像帧...", throttle_duration_sec=2)
+        ret, frame = self.cap.read()
+        if not ret:
+            self.get_logger().warn("无法捕获图像")
             return
-        # (可选但推荐) 检查图像是否过时
-        time_since_last_frame = (self.get_clock().now() - self.frame_received_time).nanoseconds / 1e9
-        if time_since_last_frame > 1.0: # 如果超过1秒没有新图像
-            self.get_logger().error("图像话题已超时！检查桥接或仿真是否正常。")
-            return
-
+        self.latest_frame = frame
 
         #进入offboard前发布位置控制点
-        
-                
+             
         if self.offboard_setpoint_counter < 10:
             self.publish_position_setpoint(self.vehicle_local_position.x, self.vehicle_local_position.y, self.vehicle_local_position.z)
             self.engage_offboard_mode()  
             # 仅在日志计数满足条件时打印
             if self.log_counter % 10 == 0:
-                self.get_logger().info(f"尝试切入offboard, 向前飞行距离{self.forward_x}m")
+                self.get_logger().info(f"尝试切入offboard, ==============向前飞行距离{self.forward_x}m===================")
 
         if self.vehicle_status.nav_state == VehicleStatus.NAVIGATION_STATE_OFFBOARD:
 
@@ -1366,12 +1320,13 @@ class OffboardControl(Node):
         
         # =================== 显示图像 ===================
     # 显示由视觉定时器生成的最新标注图像
-        if self.latest_annotated_frame is not None:
-            cv2.imshow("Drone View", self.latest_annotated_frame)
-            cv2.waitKey(1)
+        if self.show_video:
+            if self.latest_annotated_frame is not None:
+                cv2.imshow("Drone View", self.latest_annotated_frame)
+                cv2.waitKey(1)
         elasped_timer_time = (self.get_clock().now() - timer_start).nanoseconds / 1e9
         if self.offboard_setpoint_counter % 50 == 0:
-            self.get_logger().info(f"控制循环花费时间：{elasped_timer_time:.5f}")
+            self.get_logger().info(f"控制循环花费时间：{elasped_timer_time:.5f}s")
         
     def vision_timer_callback(self):
         """
@@ -1425,9 +1380,9 @@ def main(args=None) -> None:
     parser = argparse.ArgumentParser(description="Offboard control script for PX4 drone mission.")
     
     # 添加你想通过命令行配置的参数
-    parser.add_argument('--model-path', type=str, default='/home/kpc/weights/best_sim.pt',
+    parser.add_argument('--model-path', type=str, default='/home/weights/0728.engine',
                         help='Path to the object detection model file.')
-    parser.add_argument('--photo-path', type=str, default='/home/kpc/image_recodes',
+    parser.add_argument('--photo-path', type=str, default='/home/image_recodes',
                         help='Base directory to save captured photos.')
     parser.add_argument('--video-path', type=str, default='/home/video_recodes',
                         help='Base directory to save recorded mission videos.')
@@ -1439,7 +1394,7 @@ def main(args=None) -> None:
     parser.add_argument('--descent-height', type=float, default=1.0,
                         help='Descent height after first alignment in meters (positive value).')
     
-    parser.add_argument('--forward-x', type=float, default=2.5,
+    parser.add_argument('--forward-x', type=float, default=32.5,
                         help='Forward distance to fly to the drop area in meters.')
     parser.add_argument('--search-height', type=float, default=-5.0,
                         help='Global search height in meters (negative value for altitude).')
@@ -1484,7 +1439,7 @@ def main(args=None) -> None:
                     help='触发距离的阈值.')
     
      # --- 定时器参数 ---
-    parser.add_argument('--timer-period', type=float, default=0.03,
+    parser.add_argument('--timer-period', type=float, default=0.04,
                         help='定时器周期 (秒), 这也决定了PID控制中的 dt。默认: 0.03s (约33Hz).')
     parser.add_argument('--vision-timer-period', type=float, default=0.1,
                         help='定时器周期 (秒), 默认: 0.1s (10Hz).')
@@ -1517,6 +1472,14 @@ def main(args=None) -> None:
                         help='判断无人机到达导航点（如投水区）的误差阈值（米）。')
     parser.add_argument('--target-approach-threshold', type=float, default=0.3,
                         help='判断无人机飞到目标上方，可以开始精确对准的误差阈值（米）。')
+    
+    parser.add_argument('--headless', action='store_true',
+                        help='以无头模式运行，不显示摄像头的GUI窗口。')
+    
+    # <<< 新增：用于控制视频录制的参数 >>>
+    parser.add_argument('--record-video', action='store_true',
+                        help='启用任务视频录制功能。')
+    
     # --- 选择投放桶 --- 
     parser.add_argument('--target-order', 
                         type=int,  # 关键：将类型改为整数
@@ -1575,8 +1538,31 @@ def main(args=None) -> None:
     custom_args.target_order = translated_order_strings
     
     # =================================================================
-
-    print(f"任务将按照以下顺序执行投放: {custom_args.target_order}")
+    # ##########################################################################
+    # ################          新增的任务参数总览打印模块          ################
+    # ##########################################################################
+    print("\n================== 任务参数总览 ==================")
+    print(f"  - 模型文件: {custom_args.model_path}")
+    print(f"  - 目标投放顺序: {custom_args.target_order}")
+    print("------------------ 飞行参数 ------------------")
+    print(f"  - 计划向前飞行距离: {custom_args.forward_x} 米")
+    print(f"  - 预设起飞高度: {abs(custom_args.takeoff_height)} 米 (相对于初始位置)")
+    print(f"  - 全局搜索高度: {abs(custom_args.search_height)} 米 (相对于初始位置)")
+    print(f"  - 首次对准后下降: {custom_args.descent_height} 米")
+    print("------------------ 超时设置 ------------------")
+    print(f"  - 整体投放阶段超时: {custom_args.drop_phase_timeout} 秒")
+    print(f"  - 全局搜索阶段超时: {custom_args.search_timeout} 秒")
+    print(f"  - 首次对准阶段超时: {custom_args.first_align_maxtime} 秒")
+    print(f"  - 第二次对准阶段超时: {custom_args.second_align_maxtime} 秒")
+    print("------------------ 对准阈值 ------------------")
+    print(f"  - 首次对准稳定阈值: {custom_args.first_align_threshold} 米, 稳定时长: {custom_args.first_align_time_window} 秒")
+    print(f"  - 第二次对准稳定阈值: {custom_args.second_align_threshold} 米, 稳定时长: {custom_args.second_align_time_window} 秒")
+    print("------------------ 模式设置 ------------------")
+    print(f"  - 视频录制: {'已启用' if custom_args.record_video else '已禁用'}")
+    print(f"  - 无头模式 (不显示GUI): {'是' if custom_args.headless else '否'}")
+    print("==================================================\n")
+    # ##########################################################################
+    
     print('Starting offboard control node with custom parameters...')
     
     # 4. 将解析后的参数传入节点

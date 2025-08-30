@@ -125,9 +125,13 @@ class VisualServoingController:
 
         return x_frd, y_frd
 
-    def process_frame(self, frame, drone_altitude_z: float):
+    def process_frame(self, frame, drone_altitude_z: float, max_targets_to_confirm: int):
         """处理单帧图像，进行跟踪、确认、命名和建图。"""
         if not self.is_model_loaded:
+            return [], frame
+        
+        # 如果被告知不需要确认任何目标，就直接返回，节省计算资源
+        if max_targets_to_confirm <= 0:
             return [], frame
         
         # 帧计数器增加
@@ -152,7 +156,7 @@ class VisualServoingController:
         # 2. 分析历史，找出最稳定的ID
         all_ids_in_history = [det['id'] for frame_dets in self.tracking_history for det in frame_dets]
         id_counts = Counter(all_ids_in_history)
-        most_common_ids = [item[0] for item in id_counts.most_common(3)]
+        most_common_ids = [item[0] for item in id_counts.most_common(max_targets_to_confirm)]
         
         # 3. 为已确认的稳定ID分配逻辑名称并计算坐标
         # 这个列表将包含所有视觉信息，供主控程序使用
@@ -165,17 +169,23 @@ class VisualServoingController:
             
             confirmed_detections_this_frame.sort(key=lambda d: d['center'][0])
             
-            target_names = ["Left", "Middle", "Right"]
+            # target_names = ["Left", "Middle", "Right"]
             
             for i, det in enumerate(confirmed_detections_this_frame):
-                if i < len(target_names):
-                    coords_frd = self._pixel_to_world_frd(det['center'], drone_altitude_z)
-                    confirmed_targets_info.append({
-                        'id': det['id'],
-                        'name': target_names[i],
-                        'coords_frd': coords_frd,
-                        'center_pixel': det['center'] # <<< 新增：返回像素坐标，用于精确对准
-                    })
+                drop_target_names = ["Left", "Middle", "Right"]
+                if i < len(drop_target_names):
+                    name = drop_target_names[i]
+                else:
+                    # 为额外的侦察目标生成通用名称
+                    name = f"Recon_{i+1}"
+
+                coords_frd = self._pixel_to_world_frd(det['center'], drone_altitude_z)
+                confirmed_targets_info.append({
+                    'id': det['id'],
+                    'name': name, # 使用动态生成的名称
+                    'coords_frd': coords_frd,
+                    'center_pixel': det['center']
+                })
 
         # 4. 可视化
         annotated_frame = frame.copy()
