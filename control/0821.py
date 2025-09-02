@@ -1089,6 +1089,7 @@ class OffboardControl(Node):
                     if self.is_navigating_to_target:
                         # 1. 飞向目标点 (在搜索高度)
                         self.get_logger().info(f"({self.visited_targets_count+1}/{len(self.target_priority)}) 正在飞向目标 '{current_target_name}' @ NED({target_x:.2f}, {target_y:.2f})", throttle_duration_sec=2)
+                        # 平滑
                         self.publish_position_setpoint(target_x, target_y, self.takeoff_target_height)
                         
                         # 检查是否到达
