@@ -80,12 +80,12 @@ class OffboardControl(Node):
         
 
         self.camera_matrix = np.array([
-            [465.7411193847656, 0., 320.0],
-            [0., 465.7411193847656, 240.0],
+            [316.3597971, 0., 319.149218],
+            [0., 316.52282281, 257.56238834],
             [0., 0., 1.]
         ])
 
-        self.dist_coeffs = np.array([0.0, 0.0, 0.0, 0.0, 0.0]) # 假设畸变可以忽略
+        self.dist_coeffs = np.array([0.03886027, -0.06330637, -0.00104666, -0.00198939, 0.0241177]) # 假设畸变可以忽略
         self.get_logger().info("相机内参已配置。")
 
         base_photo_path = args.photo_path
@@ -726,8 +726,8 @@ class OffboardControl(Node):
             current_x, current_y = self.coordinate_NED2FRD(current_xned, current_yned)
             
             # 📌 计算相机坐标系误差（考虑相机中心偏移）
-            dx_cam = -self.target_position.y + self.depthcam_xoffset  # 相机中心相对投放中心的Y偏差
-            dy_cam = self.target_position.x + self.depthcam_yoffset  # 相机中心相对投放中心的X偏差
+            dx_cam = self.target_position.y + self.depthcam_xoffset  # 相机中心相对投放中心的Y偏差
+            dy_cam = -self.target_position.x + self.depthcam_yoffset  # 相机中心相对投放中心的X偏差
             distance = math.hypot(dx_cam, dy_cam)
             
             # 📌 根据误差大小选择控制策略
