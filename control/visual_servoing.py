@@ -125,7 +125,7 @@ class VisualServoingController:
 
         return x_frd, y_frd
 
-    def process_frame(self, frame, drone_altitude_z: float, max_targets_to_confirm: int):
+    def process_frame(self, frame, drone_altitude_z: float, max_targets_to_confirm: int=3):
         """处理单帧图像，进行跟踪、确认、命名和建图。"""
         if not self.is_model_loaded:
             return [], frame
