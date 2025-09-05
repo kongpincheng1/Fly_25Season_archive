@@ -147,6 +147,23 @@ class OffboardControl(Node):
         self.is_descending_for_drop = False
         self.is_final_aligning = False
 
+        # ==================== 新增：平滑下降状态变量 ====================
+        self.is_smoothing_descent = False      # 是否正在执行平滑下降
+        self.smoothing_start_pos = None        # 平滑路径的起点 (x, y, z)
+        self.smoothing_end_pos = None          # 平滑路径的终点 (x, y, z)
+        self.smoothing_total_steps = 0         # 平滑过程总共需要多少个控制周期
+        self.smoothing_step_counter = 0        # 当前执行到第几步
+
+        # <<< 新增：存储动态平滑参数 >>>
+        self.smoothing_speed = args.smoothing_speed
+        self.min_smoothing_duration = args.min_smoothing_duration
+        self.max_smoothing_duration = args.max_smoothing_duration
+        self.get_logger().info(f"平滑移动速度配置为: {self.smoothing_speed} m/s "
+                            f"(持续时间范围: {self.min_smoothing_duration}s - {self.max_smoothing_duration}s)")
+
+        
+        # ================================================================
+
         self.is_drop_initiated_for_current_target = False
 
         self.is_drop_area_calculated = False
@@ -186,6 +203,15 @@ class OffboardControl(Node):
 
         self.trigger_distance = args.trigger_distance
         self.position_threshold = args.position_threshold
+
+
+        # <<< 新增：从命令行参数初始化侦察任务参数 >>>
+        self.recon_trigger_distance = args.recon_trigger_distance
+        self.recon_search_height = args.recon_search_height
+        self.recon_search_timeout = args.recon_search_timeout
+        self.recon_hover_time = args.recon_hover_time
+        self.recon_nav_threshold = args.recon_nav_threshold
+
 
         self.global_search_target_z = None
 
@@ -663,6 +689,47 @@ class OffboardControl(Node):
         self.is_navigating_to_target = True
         self.get_logger().info("状态机已重置，开始导航至下一个目标。")
 
+    def _start_smooth_move(self, end_pos_ned: tuple):
+        """
+        计算并启动到目标点的动态平滑移动。
+        """
+        # 1. 设置起点为当前无人机的位置
+        start_pos_ned = (
+            self.vehicle_local_position.x,
+            self.vehicle_local_position.y,
+            self.vehicle_local_position.z
+        )
+        self.smoothing_start_pos = start_pos_ned
+        self.smoothing_end_pos = end_pos_ned
+
+        # 2. 计算三维空间距离
+        dx = end_pos_ned[0] - start_pos_ned[0]
+        dy = end_pos_ned[1] - start_pos_ned[1]
+        dz = end_pos_ned[2] - start_pos_ned[2]
+        distance = math.sqrt(dx**2 + dy**2 + dz**2)
+
+        # 3. 根据速度计算理想持续时间
+        if self.smoothing_speed > 0.01: # 避免除以零
+            ideal_duration = distance / self.smoothing_speed
+        else:
+            ideal_duration = self.max_smoothing_duration
+
+        # 4. 将持续时间限制在预设的最小和最大值之间
+        clamped_duration = max(self.min_smoothing_duration, min(ideal_duration, self.max_smoothing_duration))
+        
+        # 5. 根据最终持续时间计算总步数
+        self.smoothing_total_steps = int(clamped_duration / self.dt)
+        if self.smoothing_total_steps < 1:
+            self.smoothing_total_steps = 1 # 确保至少有一步
+
+        self.get_logger().info(f"启动平滑移动: 距离={distance:.2f}m, "
+                               f"计算耗时={clamped_duration:.2f}s, "
+                               f"总步数={self.smoothing_total_steps}")
+        
+        # 6. 重置计数器并激活平滑移动标志
+        self.smoothing_step_counter = 0
+        self.is_smoothing_descent = True # 使用相同的标志位
+
     def adjust_to_target(self):
         """Adjust drone position towards the current target."""   
         is_in_second_alignment = self.first_alignment_complete and not self.second_alignment_complete
@@ -1123,13 +1190,59 @@ class OffboardControl(Node):
                             self.get_logger().error("搜索结束但未规划任何有效目标！进入超时投放。")
                             self.mission_state = MissionState.TIMEOUT_DROP
                         else:
-                            self.mission_state = MissionState.TARGETING_CYCLE
-                            self.is_navigating_to_target = True
+                            # ==================== 启动平滑下降过程 ====================
+                            self.get_logger().info("任务地图已构建，启动向首个目标的平滑移动。")
+                        
+                            first_target = self.mission_targets_ned[0]
+                            target_x, target_y = first_target['coords_ned']
+                            end_position = (target_x, target_y, self.takeoff_target_height)
+                            
+                            # 调用新的辅助函数来启动平滑移动
+                            self._start_smooth_move(end_position)
 
+                            self.mission_state = MissionState.TARGETING_CYCLE
+                            # ========================================================
                         return
                 
             
                 elif self.mission_state == MissionState.TARGETING_CYCLE:
+                    # ==================== 新增：平滑下降处理模块 ====================
+                    if self.is_smoothing_descent:
+                        # 计算当前进度 (从 0.0 到 1.0)
+                        progress = self.smoothing_step_counter / self.smoothing_total_steps
+                        progress = min(progress, 1.0) # 确保不会超过1.0
+
+                        # 线性插值计算当前的中间目标点
+                        start_x, start_y, start_z = self.smoothing_start_pos
+                        end_x, end_y, end_z = self.smoothing_end_pos
+
+                        interp_x = start_x * (1 - progress) + end_x * progress
+                        interp_y = start_y * (1 - progress) + end_y * progress
+                        interp_z = start_z * (1 - progress) + end_z * progress
+                        
+                        # 发布这个中间目标点
+                        self.publish_position_setpoint(interp_x, interp_y, interp_z)
+
+                        # 每隔一段时间打印日志，观察过程
+                        if self.smoothing_step_counter % 25 == 0: # 大约每秒打印一次 (25 * 0.04s)
+                            self.get_logger().info(f"平滑下降中 ({self.smoothing_step_counter}/{self.smoothing_total_steps})... "
+                                                   f"目标高度: {interp_z:.2f} m")
+
+                        # 更新步数
+                        self.smoothing_step_counter += 1
+
+                        # 检查平滑过程是否完成
+                        if self.smoothing_step_counter > self.smoothing_total_steps:
+                            self.publish_position_setpoint(end_x,end_y,end_z)
+                            dist_err = math.hypot(self.vehicle_local_position.x - end_x, self.vehicle_local_position.y - end_y)
+                            if dist_err < self.target_approach_threshold: # 到达阈值
+                                self.get_logger().info(f"已到达目标上方，准备下降。")
+                                self.is_navigating_to_target = False
+                                self.is_final_aligning = True
+                                self.is_smoothing_descent = False # 关闭平滑模式
+                        # 在平滑下降期间，直接返回，不执行下面的对准逻辑
+                        return 
+                    # ================================================================
             
                     # 检查是否所有规划的目标都已打击，或已用完两次投放机会
                     if self.current_target_index >= len(self.mission_targets_ned) or self.visited_targets_count >= 2:
@@ -1140,23 +1253,23 @@ class OffboardControl(Node):
                     # 获取当前要打击的目标
                     current_target = self.mission_targets_ned[self.current_target_index]
                     current_target_name = current_target['name']
-                    target_x, target_y = current_target['coords_ned']
+                    # target_x, target_y = current_target['coords_ned']
                     
                     # --- TARGETING_CYCLE 的内部状态机 ---
-                    if self.is_navigating_to_target:
-                        # 1. 飞向目标点 (在搜索高度)
-                        self.get_logger().info(f"({self.visited_targets_count+1}/{len(self.target_priority)}) 正在飞向目标 '{current_target_name}' @ NED({target_x:.2f}, {target_y:.2f})", throttle_duration_sec=2)
-                        self.publish_position_setpoint(target_x, target_y, self.takeoff_target_height)
+                    # if self.is_navigating_to_target:
+                    #     # 1. 飞向目标点 (在搜索高度)
+                    #     self.get_logger().info(f"({self.visited_targets_count+1}/{len(self.target_priority)}) 正在飞向目标 '{current_target_name}' @ NED({target_x:.2f}, {target_y:.2f})", throttle_duration_sec=2)
+                    #     self.publish_position_setpoint(target_x, target_y, self.takeoff_target_height)
                         
-                        # 检查是否到达
-                        dist_err = math.hypot(self.vehicle_local_position.x - target_x, self.vehicle_local_position.y - target_y)
-                        if dist_err < self.target_approach_threshold: # 到达阈值
-                            self.get_logger().info(f"已到达 '{current_target_name}' 上方，准备下降。")
-                            self.is_navigating_to_target = False
-                            self.is_final_aligning = True
+                    #     # 检查是否到达
+                    #     dist_err = math.hypot(self.vehicle_local_position.x - target_x, self.vehicle_local_position.y - target_y)
+                    #     if dist_err < self.target_approach_threshold: # 到达阈值
+                    #         self.get_logger().info(f"已到达 '{current_target_name}' 上方，准备下降。")
+                    #         self.is_navigating_to_target = False
+                    #         self.is_final_aligning = True
 
 
-                    elif self.is_final_aligning:
+                    if self.is_final_aligning:
                         # 3. 使用深度相机进行最终对准和投放
                         self.get_logger().info(f"正在对 '{current_target_name}' 进行最终对准...", throttle_duration_sec=2)
                         self.adjust_to_target() # 调用你已有的、基于/target_position的精确对准函数
@@ -1196,6 +1309,13 @@ class OffboardControl(Node):
                             self.get_logger().info("停留结束。")
                             self.is_waiting_post_drop = False
                             self.reset_for_next_target() # 现在才重置并开始下一个任务
+                            if self.current_target_index < len(self.mission_targets_ned):
+                                self.get_logger().info("准备飞向下一个目标，再次启动平滑移动。")
+                                next_target = self.mission_targets_ned[self.current_target_index]
+                                target_x, target_y = next_target['coords_ned']
+                                end_position = (target_x, target_y, self.takeoff_target_height)
+                                # 再次调用新的辅助函数
+                                self._start_smooth_move(end_position)
 
 
                 elif self.mission_state == MissionState.TIMEOUT_DROP:
@@ -1245,36 +1365,86 @@ class OffboardControl(Node):
                             self.get_logger().error("未发现任何侦察目标！任务结束。")
                             self.mission_state = MissionState.MISSION_COMPLETE
                         else:
-                            self.get_logger().info("侦察地图构建完成，开始逐个飞越目标。")
+                            self.get_logger().info("侦察地图构建完成，开始平滑飞越首个目标。")
+                            
+                            # Get the first target from the newly built list
+                            first_target = self.recon_targets_ned[0]
+                            target_name, (target_x, target_y) = first_target['name'], first_target['coords_ned']
+
+                            # Use your helper function to start the smooth move
+                            end_position = (target_x, target_y, self.takeoff_target_height)
+                            self._start_smooth_move(end_position)
+                            
                             self.mission_state = MissionState.RECON_CYCLE
 
                 # 状态：RECON_CYCLE
                 elif self.mission_state == MissionState.RECON_CYCLE:
-                    # ... (这部分逻辑不变) ...
+                    
                     if self.current_recon_index >= len(self.recon_targets_ned):
                         self.get_logger().info("所有侦察目标均已访问，任务完成！")
                         self.mission_state = MissionState.MISSION_COMPLETE
+                        return 
+                    
+                    if self.is_smoothing_descent:
+                        # 计算当前进度 (从 0.0 到 1.0)
+                        progress = self.smoothing_step_counter / self.smoothing_total_steps
+                        progress = min(progress, 1.0)
+
+                        # 线性插值计算当前的中间目标点
+                        start_x, start_y, start_z = self.smoothing_start_pos
+                        end_x, end_y, end_z = self.smoothing_end_pos
+                        interp_x = start_x * (1 - progress) + end_x * progress
+                        interp_y = start_y * (1 - progress) + end_y * progress
+                        interp_z = start_z * (1 - progress) + end_z * progress
+                        
+                        self.publish_position_setpoint(interp_x, interp_y, interp_z)
+                        self.smoothing_step_counter += 1
+
+                        # 当平滑移动时间结束时，关闭标志位。
+                        # 后续逻辑将负责确认最终到达。
+                        if self.smoothing_step_counter > self.smoothing_total_steps:
+                            self.get_logger().info("平滑移动阶段完成，现在确认最终到达。")
+                            self.is_smoothing_descent = False
+                        
+                        return # 在平滑移动期间，跳过后续逻辑
+
+                    # 获取当前目标信息
+                    target = self.recon_targets_ned[self.current_recon_index]
+                    target_name, (target_x, target_y) = target['name'], target['coords_ned']
+
+                    if not self.is_hovering_at_recon_point:
+                        # STATE: MOVING & ARRIVING
+                        # 平滑移动已结束，现在我们发布最终目标点并等待无人机精确到达。
+                        self.get_logger().info(f"正在接近侦察目标 {self.current_recon_index + 1}/{len(self.recon_targets_ned)}: '{target_name}'", throttle_duration_sec=2)
+                        self.publish_position_setpoint(target_x, target_y, self.takeoff_target_height)
+                        
+                        dist_err = math.hypot(self.vehicle_local_position.x - target_x, self.vehicle_local_position.y - target_y)
+                        if dist_err < self.recon_nav_threshold:
+                            # 已到达！切换到悬停状态。
+                            self.get_logger().info(f"已到达 '{target_name}' 上方，开始悬停侦察 {self.recon_hover_time} 秒。")
+                            self.is_hovering_at_recon_point = True
+                            self.recon_hover_start_time = self.get_clock().now()
                     else:
-                        target = self.recon_targets_ned[self.current_recon_index]
-                        target_name, (target_x, target_y) = target['name'], target['coords_ned']
-                        if not self.is_hovering_at_recon_point:
-                            self.get_logger().info(f"正在飞往侦察目标 {self.current_recon_index + 1}/{len(self.recon_targets_ned)}: '{target_name}'", throttle_duration_sec=2)
+                        # STATE: HOVERING
+                        elapsed_hover_time = (self.get_clock().now() - self.recon_hover_start_time).nanoseconds / 1e9
+                        if elapsed_hover_time < self.recon_hover_time:
+                            # 保持悬停
+                            self.get_logger().info(f"正在侦察 '{target_name}'... {elapsed_hover_time:.1f}s", throttle_duration_sec=1)
                             self.publish_position_setpoint(target_x, target_y, self.takeoff_target_height)
-                            dist_err = math.hypot(self.vehicle_local_position.x - target_x, self.vehicle_local_position.y - target_y)
-                            if dist_err < self.recon_nav_threshold:
-                                self.get_logger().info(f"已到达 '{target_name}' 上方，开始悬停侦察 {self.recon_hover_time} 秒。")
-                                self.is_hovering_at_recon_point = True
-                                self.recon_hover_start_time = self.get_clock().now()
                         else:
-                            elapsed_hover_time = (self.get_clock().now() - self.recon_hover_start_time).nanoseconds / 1e9
-                            if elapsed_hover_time < self.recon_hover_time:
-                                self.get_logger().info(f"正在侦察 '{target_name}'... {elapsed_hover_time:.1f}s", throttle_duration_sec=1)
-                                self.publish_position_setpoint(target_x, target_y, self.takeoff_target_height)
-                            else:
-                                self.get_logger().info(f"'{target_name}' 侦察完毕，飞往下一个目标。")
-                                self.current_recon_index += 1
-                                self.is_hovering_at_recon_point = False
-                
+                            # 悬停结束，准备飞往下一个目标
+                            self.get_logger().info(f"'{target_name}' 侦察完毕。")
+                            self.current_recon_index += 1
+                            self.is_hovering_at_recon_point = False # 切换回“移动”状态
+                            
+                            # 如果还有下一个目标，则为它启动平滑移动
+                            if self.current_recon_index < len(self.recon_targets_ned):
+                                next_target = self.recon_targets_ned[self.current_recon_index]
+                                next_target_name, (next_target_x, next_target_y) = next_target['name'], next_target['coords_ned']
+                                self.get_logger().info(f"准备平滑移动至下一个目标: '{next_target_name}'")
+                                end_position = (next_target_x, next_target_y, self.takeoff_target_height)
+                                self._start_smooth_move(end_position)
+
                 # 状态：MISSION_COMPLETE
                 elif self.mission_state == MissionState.MISSION_COMPLETE:
                     self.get_logger().info("所有任务阶段均已完成，执行降落。")
@@ -1499,6 +1669,14 @@ def main(args=None) -> None:
                         help='到达每个侦察圆筒上方后的悬停侦察时间（秒）。')
     parser.add_argument('--recon-nav-threshold', type=float, default=0.5,
                         help='判断无人机到达侦察点的误差阈值（米）。')
+    
+    # <<< 新增：动态平滑移动的参数 >>>
+    parser.add_argument('--smoothing-speed', type=float, default=1.5,
+                        help='Average speed (m/s) for smooth transitions between targets.')
+    parser.add_argument('--min-smoothing-duration', type=float, default=1.0,
+                        help='Minimum duration (seconds) for any smooth move to ensure stability.')
+    parser.add_argument('--max-smoothing-duration', type=float, default=8.0,
+                        help='Maximum duration (seconds) for any smooth move to cap long-distance travel time.')
     
     # 3. 解析参数
     # 使用 rclpy.utilities.remove_ros_args 来确保我们只解析自己的参数，
