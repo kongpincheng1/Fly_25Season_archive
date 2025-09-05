@@ -219,9 +219,10 @@ class OffboardControl(Node):
         self.is_AtDropArea = False
         self.is_FinishDrop = False
 
-        self.droping_x = None
-        self.droping_y = None
-        self.droping_z = None
+
+        self.postdrop_waiting_x = None
+        self.postdrop_waiting_y = None
+        self.postdrop_waiting_z = None
 
         # 新增日志计数器，用于减少日志输出频率
         self.log_counter = 0
@@ -740,10 +741,7 @@ class OffboardControl(Node):
                         self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
                         
                     self.first_align_start_timestamp = None # 重置计时器
-                    
-                    self.droping_x = self.vehicle_local_position.x
-                    self.droping_y = self.vehicle_local_position.y
-                    self.droping_z = self.vehicle_local_position.z
+
                     
                     # 关键：强制设置第一次对准完成，以便任务流程能够继续
                     self.first_alignment_complete = True
@@ -776,10 +774,7 @@ class OffboardControl(Node):
                     
                     
                     self.second_align_start_timestamp = None # 重置计时器
-                    
-                    self.droping_x = self.vehicle_local_position.x
-                    self.droping_y = self.vehicle_local_position.y
-                    self.droping_z = self.vehicle_local_position.z
+
                 # <<< 投放逻辑结束 >>>
 
                 return # 既然已经超时投放，直接结束本次函数调用
@@ -912,14 +907,43 @@ class OffboardControl(Node):
                     self.drop_payload(1) # 启动第一次投水
                     self.is_drop_initiated_for_current_target = True
                     self.second_align_start_timestamp = None
+
+                    self.postdrop_waiting_x = self.vehicle_local_position.x
+                    self.postdrop_waiting_y = self.vehicle_local_position.y
+                    self.postdrop_waiting_z = self.vehicle_local_position.z
+
+                    self.get_logger().info(f"进行目标1投放！")
+                    self.get_logger().info(f"将在原地悬停 {self.post_drop_delay} 秒...")
+                    
+                    ### MODIFIED ###
+                    # 进入投放后等待状态，而不是直接重置
+                    self.is_final_aligning = False
+                    self.is_waiting_post_drop = True
+                    self.post_drop_start_time = self.get_clock().now()
+                    return
+
+
                 
                 elif self.current_dropping_state[2] == DroppingState.IDLE and self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop:
                     self.drop_payload(2) # 启动第二次投水
                     self.is_drop_initiated_for_current_target = True
                     self.second_align_start_timestamp = None
-                self.droping_x = self.vehicle_local_position.x
-                self.droping_y = self.vehicle_local_position.y
-                self.droping_z = self.vehicle_local_position.z
+
+                    self.postdrop_waiting_x = self.vehicle_local_position.x
+                    self.postdrop_waiting_y = self.vehicle_local_position.y
+                    self.postdrop_waiting_z = self.vehicle_local_position.z
+
+                    self.get_logger().info(f"进行目标2投放！")
+                    self.get_logger().info(f"将在原地悬停 {self.post_drop_delay} 秒...")
+                    
+                    ### MODIFIED ###
+                    # 进入投放后等待状态，而不是直接重置
+                    self.is_final_aligning = False
+                    self.is_waiting_post_drop = True
+                    self.post_drop_start_time = self.get_clock().now()
+
+                    return
+
 
                 
         else:
@@ -1046,10 +1070,7 @@ class OffboardControl(Node):
                 if is_done:
                     self.get_logger().info("第一次投水流程确认完成。")
                     self.Is_Finish_1st_Drop = True
-                    # 记录投放位置等
-                    self.droping_x = self.vehicle_local_position.x
-                    self.droping_y = self.vehicle_local_position.y
-                    self.droping_z = self.vehicle_local_position.z
+
 
             if self.current_dropping_state[2] != DroppingState.IDLE and not self.Is_Finish_2nd_Drop:
                 is_done = self.manage_dropping_sequence(2)
@@ -1214,20 +1235,6 @@ class OffboardControl(Node):
                     # 获取当前要打击的目标
                     current_target = self.mission_targets_ned[self.current_target_index]
                     current_target_name = current_target['name']
-                    # target_x, target_y = current_target['coords_ned']
-                    
-                    # --- TARGETING_CYCLE 的内部状态机 ---
-                    # if self.is_navigating_to_target:
-                    #     # 1. 飞向目标点 (在搜索高度)
-                    #     self.get_logger().info(f"({self.visited_targets_count+1}/{len(self.target_priority)}) 正在飞向目标 '{current_target_name}' @ NED({target_x:.2f}, {target_y:.2f})", throttle_duration_sec=2)
-                    #     self.publish_position_setpoint(target_x, target_y, self.takeoff_target_height)
-                        
-                    #     # 检查是否到达
-                    #     dist_err = math.hypot(self.vehicle_local_position.x - target_x, self.vehicle_local_position.y - target_y)
-                    #     if dist_err < self.target_approach_threshold: # 到达阈值
-                    #         self.get_logger().info(f"已到达 '{current_target_name}' 上方，准备下降。")
-                    #         self.is_navigating_to_target = False
-                    #         self.is_final_aligning = True
 
 
                     if self.is_final_aligning:
@@ -1235,33 +1242,17 @@ class OffboardControl(Node):
                         self.get_logger().info(f"正在对 '{current_target_name}' 进行最终对准...", throttle_duration_sec=2)
                         self.adjust_to_target() # 调用你已有的、基于/target_position的精确对准函数
 
-                        # 检查是否投放完成 (adjust_to_target 会设置 Is_Finish_1st_Drop/2nd_Drop)
-                        is_first_drop_done = self.visited_targets_count == 0 and self.Is_Finish_1st_Drop
-                        is_second_drop_done = self.visited_targets_count == 1 and self.Is_Finish_2nd_Drop
-                        
-                        if is_first_drop_done :
-                            self.get_logger().info(f"目标 '{current_target_name}' (第1个) 投放完成！")
-                            self.get_logger().info(f"将在原地悬停 {self.post_drop_delay} 秒...")
-                            
-                            ### MODIFIED ###
-                            # 进入投放后等待状态，而不是直接重置
-                            self.is_final_aligning = False
-                            self.is_waiting_post_drop = True
-                            self.post_drop_start_time = self.get_clock().now()
-
-                        elif is_second_drop_done:
-                                self.get_logger().info(f"目标 '{current_target_name}' (第2个) 投放完成！")
-                                # 此时不需要再 reset_for_next_target，直接标记总任务完成
-                                self.is_FinishDrop = True
-                                self.get_logger().info("所有预定目标均已打击。")
                     
                     elif self.is_waiting_post_drop:
-                        self.get_logger().info("投放后等待中...", throttle_duration_sec=1)
+                        self.get_logger().info("投放时等待中...", throttle_duration_sec=1)
+                        #判断是否完成第一/二次投放
+                        is_first_drop_done = self.visited_targets_count == 0 and self.Is_Finish_1st_Drop
+                        is_second_drop_done = self.visited_targets_count == 1 and self.Is_Finish_2nd_Drop
                         # 保持在当前位置悬停
                         self.publish_position_setpoint(
-                            self.vehicle_local_position.x,
-                            self.vehicle_local_position.y,
-                            self.vehicle_local_position.z
+                            self.postdrop_waiting_x,
+                            self.postdrop_waiting_y,
+                            self.postdrop_waiting_z,
                         )
                         
                         # 检查延时是否结束
@@ -1269,14 +1260,22 @@ class OffboardControl(Node):
                         if elapsed_delay > self.post_drop_delay:
                             self.get_logger().info("停留结束。")
                             self.is_waiting_post_drop = False
-                            self.reset_for_next_target() # 现在才重置并开始下一个任务
-                            if self.current_target_index < len(self.mission_targets_ned):
-                                self.get_logger().info("准备飞向下一个目标，再次启动平滑移动。")
-                                next_target = self.mission_targets_ned[self.current_target_index]
-                                target_x, target_y = next_target['coords_ned']
-                                end_position = (target_x, target_y, self.takeoff_target_height)
-                                # 再次调用新的辅助函数
-                                self._start_smooth_move(end_position)
+                            if is_first_drop_done:
+                                self.reset_for_next_target() # 现在才重置并开始下一个任务
+                                if self.current_target_index < len(self.mission_targets_ned):
+                                    self.get_logger().info("准备飞向下一个目标，再次启动平滑移动。")
+                                    next_target = self.mission_targets_ned[self.current_target_index]
+                                    target_x, target_y = next_target['coords_ned']
+                                    end_position = (target_x, target_y, self.takeoff_target_height)
+                                    # 再次调用新的辅助函数
+                                    self._start_smooth_move(end_position, self.smoothing_speed)
+                            elif is_second_drop_done:
+                                self.get_logger().info(f"目标 '{current_target_name}' (第2个) 投放完成！")
+                                # 此时不需要再 reset_for_next_target，直接标记总任务完成
+                                self.is_FinishDrop = True
+                                self.get_logger().info("所有预定目标均已打击。")
+
+
 
 
                 elif self.mission_state == MissionState.TIMEOUT_DROP:
