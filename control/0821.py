@@ -219,6 +219,9 @@ class OffboardControl(Node):
         self.Is_Finish_2nd_Drop = False
 
         self.search_start_time = None
+
+        self.last_target_update_time = None
+        self.target_timeout_duration = 1.0  # 目标信息超时秒数，例如1秒。可以设为命令行参数。
         
         
         ### 新增: 用于稳定建图的数据收集变量 ###
@@ -295,6 +298,7 @@ class OffboardControl(Node):
         self.Kp_fine = args.kp  # P增益 - 可调参数 (建议范围: 1.0-2.5)
         self.Ki = args.ki       # I增益 - 可调参数 (建议范围: 0.1-0.8)
         self.Kd = args.kd
+        self.Kf = args.kf
         
         # 📌 PID状态变量
         self.integral_x = 0.0      # X方向积分项
@@ -309,7 +313,9 @@ class OffboardControl(Node):
 
     def target_position_callback(self, msg: Point):
         """Callback function for receiving target position."""
-        self.target_position = msg  
+        self.target_position = msg
+         # <<<更新收到目标的时间戳 >>>
+        self.last_target_update_time = self.get_clock().now()  
 
     def fly_to_position(self, x, y, z):
         """Fly to the specified position."""
@@ -642,6 +648,16 @@ class OffboardControl(Node):
 
     def adjust_to_target(self):
         """Adjust drone position towards the current target."""   
+        # <<< 新增：超时检查逻辑 >>>
+        is_target_valid = False
+        if self.target_position and self.last_target_update_time:
+            elapsed_time = (self.get_clock().now() - self.last_target_update_time).nanoseconds / 1e9
+            if elapsed_time < self.target_timeout_duration:
+                is_target_valid = True
+            else:
+                if self.log_counter % 30 == 0:
+                    self.get_logger().warn(f"目标信息已超时 ({elapsed_time:.2f}s > {self.target_timeout_duration}s)，将忽略旧目标。")
+                    
         is_in_second_alignment = self.first_alignment_complete and not self.second_alignment_complete
         is_in_first_alignment = not self.first_alignment_complete
 
@@ -712,7 +728,7 @@ class OffboardControl(Node):
                 return # 既然已经超时投放，直接结束本次函数调用
             
       
-        if self.target_position:
+        if is_target_valid:
             # ========== pid控制实现，记录目标像素坐标 ========== 
             self.pixel_log_writer.writerow([
         time.time(),
@@ -751,21 +767,32 @@ class OffboardControl(Node):
                 derivative_x = (error_x - self.last_error_x) / self.dt
                 derivative_y = (error_y - self.last_error_y) / self.dt
                 
+                velocity_x_ned = self.vehicle_local_position.vx  # X速度 (North)
+                velocity_y_ned = self.vehicle_local_position.vy  # Y速度 (East)
+                vel_x_body_frame = velocity_x_ned * math.cos(self.init_yaw) + velocity_y_ned * math.sin(self.init_yaw)
+                vel_y_body_frame = -velocity_x_ned * math.sin(self.init_yaw) + velocity_y_ned * math.cos(self.init_yaw)
+                
+                feedforward_x = self.Kf * vel_x_body_frame
+                feedforward_y = self.Kf * vel_y_body_frame
+                
                 # 📌 PID控制量计算
                 control_x = (self.Kp_fine * error_x + 
                            self.Ki * self.integral_x + 
-                           self.Kd * derivative_x)
+                           self.Kd * derivative_x-feedforward_x)
                 control_y = (self.Kp_fine * error_y + 
                            self.Ki * self.integral_y + 
-                           self.Kd * derivative_y)
+                           self.Kd * derivative_y-feedforward_y)
                 
                 # 保存本次误差用于下次微分计算
                 self.last_error_x = error_x
                 self.last_error_y = error_y
                 
                 if self.log_counter % 10 == 0:
-                    self.get_logger().info(f"PID输出: P={self.Kp_fine * error_x:.3f}, I={self.Ki * self.integral_x:.3f}, D={self.Kd * derivative_x:.3f}")
-                
+                    p_term = self.Kp_fine * error_x
+                    i_term = self.Ki * self.integral_x
+                    d_term = self.Kd * derivative_x
+                    f_term = -feedforward_x
+                    self.get_logger().info(f"PIDF输出: P={p_term:.3f}, I={i_term:.3f}, D={d_term:.3f}, F={f_term:.3f}")
             else:
                 # ——————— 大误差阶段：饱和P控制 ———————
                 if self.log_counter % 10 == 0:
@@ -817,8 +844,6 @@ class OffboardControl(Node):
                 self.last_found_x_NED = target_x_NED
                 self.last_found_y_NED = target_y_NED
                 self.last_found_z_NED = self.takeoff_target_height + self.afterAlign_descentHeight
-
-            self.target_position = None
             
             # ============== 投水逻辑 ==============
             if self.first_alignment_complete and self.second_alignment_complete and not self.is_drop_initiated_for_current_target:
@@ -1306,6 +1331,8 @@ def main(args=None) -> None:
                         help='PID控制器 - 积分增益 (Ki)。默认: 0.1021.')
     parser.add_argument('--kd', type=float, default=0.0009,
                         help='PID控制器 - 微分增益 (Kd)。默认: 0.0009.')
+    parser.add_argument('--kf', type=float, default=0.3,
+                    help='前馈控制器 - 基于速度的阻尼增益 (Kf)。建议范围: 0.1 - 0.5')
 
     # --- PID 行为阈值和限制参数 ---
     parser.add_argument('--max-integral', type=float, default=0.2, # 这个值默认等于 align_maxstep
