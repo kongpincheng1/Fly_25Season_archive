@@ -201,6 +201,7 @@ class OffboardControl(Node):
         self.takeoff_height = args.takeoff_height
         #向前飞行的距离
         self.forward_x = args.forward_x
+        self.forward_flight_speed = args.forward_flight_speed
         # <<< 修改：从命令行参数初始化任务参数 >>>
         self.align_maxstep = args.align_maxstep
         self.afterAlign_descentHeight = args.descent_height
@@ -343,6 +344,8 @@ class OffboardControl(Node):
         self.Kp_fine = args.kp  # P增益 - 可调参数 (建议范围: 1.0-2.5)
         self.Ki = args.ki       # I增益 - 可调参数 (建议范围: 0.1-0.8)
         self.Kd = args.kd
+
+        self.Kf = args.kf
         
         # 📌 PID状态变量
         self.integral_x = 0.0      # X方向积分项
@@ -364,6 +367,9 @@ class OffboardControl(Node):
         self.recon_hover_start_time = None       # 到达侦察点后，悬停开始时间
         self.is_hovering_at_recon_point = False  # 是否正在悬停侦察的标志
 
+        self.last_target_update_time = None
+        self.target_timeout_duration = 1.0
+
 
 
     # +++ (新增的回调函数) +++
@@ -384,6 +390,7 @@ class OffboardControl(Node):
     def target_position_callback(self, msg: Point):
         """Callback function for receiving target position."""
         self.target_position = msg  
+        self.last_target_update_time = self.get_clock().now()
 
     def fly_to_position(self, x, y, z):
         """Fly to the specified position."""
@@ -713,9 +720,11 @@ class OffboardControl(Node):
         self.is_navigating_to_target = True
         self.get_logger().info("状态机已重置，开始导航至下一个目标。")
 
-    def _start_smooth_move(self, end_pos_ned: tuple):
+    def _start_smooth_move(self, end_pos_ned: tuple, speed: float):
         """
         计算并启动到目标点的动态平滑移动。
+        :param end_pos_ned: 目标点的NED坐标 (x, y, z)
+        :param speed: 本次移动期望的平均速度 (m/s)
         """
         # 1. 设置起点为当前无人机的位置
         start_pos_ned = (
@@ -733,8 +742,9 @@ class OffboardControl(Node):
         distance = math.sqrt(dx**2 + dy**2 + dz**2)
 
         # 3. 根据速度计算理想持续时间
-        if self.smoothing_speed > 0.01: # 避免除以零
-            ideal_duration = distance / self.smoothing_speed
+        # ==================== MODIFIED LINE ====================
+        if speed > 0.01: # 避免除以零
+            ideal_duration = distance / speed
         else:
             ideal_duration = self.max_smoothing_duration
 
@@ -746,7 +756,7 @@ class OffboardControl(Node):
         if self.smoothing_total_steps < 1:
             self.smoothing_total_steps = 1 # 确保至少有一步
 
-        self.get_logger().info(f"启动平滑移动: 距离={distance:.2f}m, "
+        self.get_logger().info(f"启动平滑移动: 速度={speed:.1f}m/s, 距离={distance:.2f}m, "
                                f"计算耗时={clamped_duration:.2f}s, "
                                f"总步数={self.smoothing_total_steps}")
         
@@ -756,6 +766,15 @@ class OffboardControl(Node):
 
     def adjust_to_target(self):
         """Adjust drone position towards the current target."""   
+        is_target_valid = False
+        if self.target_position and self.last_target_update_time:
+            elapsed_time = (self.get_clock().now() - self.last_target_update_time).nanoseconds / 1e9
+            if elapsed_time < self.target_timeout_duration:
+                is_target_valid = True
+            else:
+                if self.log_counter % 30 == 0:
+                    self.get_logger().warn(f"目标信息已超时 ({elapsed_time:.2f}s > {self.target_timeout_duration}s)，将忽略旧目标。")
+
         is_in_second_alignment = self.first_alignment_complete and not self.second_alignment_complete
         is_in_first_alignment = not self.first_alignment_complete
 
@@ -826,7 +845,7 @@ class OffboardControl(Node):
                 return # 既然已经超时投放，直接结束本次函数调用
             
       
-        if self.target_position:
+        if is_target_valid:
             # ========== pid控制实现，记录目标像素坐标 ========== 
             self.pixel_log_writer.writerow([
         time.time(),
@@ -865,21 +884,38 @@ class OffboardControl(Node):
                 derivative_x = (error_x - self.last_error_x) / self.dt
                 derivative_y = (error_y - self.last_error_y) / self.dt
                 
+                velocity_x_ned = self.vehicle_local_position.vx  # X速度 (North)
+                velocity_y_ned = self.vehicle_local_position.vy  # Y速度 (East)
+                
+                # 2. 将NED速度转换为机体FRD坐标系，以匹配控制误差的坐标系
+                # (速度矢量转换只需要旋转，不需要平移)
+                vel_x_body_frame = velocity_x_ned * math.cos(self.init_yaw) + velocity_y_ned * math.sin(self.init_yaw)
+                vel_y_body_frame = -velocity_x_ned * math.sin(self.init_yaw) + velocity_y_ned * math.cos(self.init_yaw)
+
+                # 3. 计算前馈控制量 (一个与当前速度方向相反的“刹车”力)
+                feedforward_x = self.Kf * vel_x_body_frame
+                feedforward_y = self.Kf * vel_y_body_frame
+
                 # 📌 PID控制量计算
                 control_x = (self.Kp_fine * error_x + 
                            self.Ki * self.integral_x + 
-                           self.Kd * derivative_x)
+                           self.Kd * derivative_x -   # <<< 注意是减号!
+                           feedforward_x)
                 control_y = (self.Kp_fine * error_y + 
                            self.Ki * self.integral_y + 
-                           self.Kd * derivative_y)
+                           self.Kd * derivative_y -   # <<< 注意是减号!
+                           feedforward_y)
                 
                 # 保存本次误差用于下次微分计算
                 self.last_error_x = error_x
                 self.last_error_y = error_y
                 
                 if self.log_counter % 10 == 0:
-                    self.get_logger().info(f"PID输出: P={self.Kp_fine * error_x:.3f}, I={self.Ki * self.integral_x:.3f}, D={self.Kd * derivative_x:.3f}")
-                
+                    p_term = self.Kp_fine * error_x
+                    i_term = self.Ki * self.integral_x
+                    d_term = self.Kd * derivative_x
+                    f_term = -feedforward_x
+                    self.get_logger().info(f"PIDF输出: P={p_term:.3f}, I={i_term:.3f}, D={d_term:.3f}, F={f_term:.3f}")
             else:
                 # ——————— 大误差阶段：饱和P控制 ———————
                 if self.log_counter % 10 == 0:
@@ -931,8 +967,6 @@ class OffboardControl(Node):
                 self.last_found_x_NED = target_x_NED
                 self.last_found_y_NED = target_y_NED
                 self.last_found_z_NED = self.takeoff_target_height + self.afterAlign_descentHeight
-
-            self.target_position = None
             
             # ============== 投水逻辑 ==============
             if self.first_alignment_complete and self.second_alignment_complete and not self.is_drop_initiated_for_current_target:
@@ -1171,16 +1205,54 @@ class OffboardControl(Node):
                 # self.is_AtTakeoffHeight = False#  测试用
 
             if self.is_AtTakeoffHeight and not self.is_AtDropArea:
-                if self.log_counter % 10 == 0:
-                    self.get_logger().info("执行步骤3,飞向投水区")
                 if not self.is_drop_area_calculated:
-                    self.get_logger().info("执行步骤3, 计算投水区位置并开始导航...")
+                    self.get_logger().info("执行步骤3: 计算投水区位置并开始平滑前飞...")
                     self.calculate_drop_area_once(self.forward_x)
+                    
+                    # 目标高度保持在起飞高度
+                    end_position = (self.DropArea_x, self.DropArea_y, self.takeoff_target_height)
+                    
+                    # 使用新的前飞速度参数启动平滑移动
+                    self._start_smooth_move(end_position, self.forward_flight_speed)
+                    
                     self.is_drop_area_calculated = True
 
-                # 步骤2: 持续导航并检查是否到达
-                self.navigate_to_drop_area()
-                # self.is_AtDropArea = False #测试用
+                # --- 步骤 2: 管理平滑过程 ---
+                if self.is_smoothing_descent:
+                    # 计算当前进度 (从 0.0 到 1.0)
+                    progress = self.smoothing_step_counter / self.smoothing_total_steps
+                    progress = min(progress, 1.0)
+
+                    # 线性插值计算当前的中间目标点
+                    start_x, start_y, start_z = self.smoothing_start_pos
+                    end_x, end_y, end_z = self.smoothing_end_pos
+                    interp_x = start_x * (1 - progress) + end_x * progress
+                    interp_y = start_y * (1 - progress) + end_y * progress
+                    interp_z = start_z * (1 - progress) + end_z * progress
+                    
+                    self.publish_position_setpoint(interp_x, interp_y, interp_z)
+                    self.smoothing_step_counter += 1
+
+                    # 当平滑移动时间结束时，关闭标志位。
+                    if self.smoothing_step_counter > self.smoothing_total_steps:
+                        self.get_logger().info("平滑前飞阶段完成，开始最终位置确认。")
+                        self.is_smoothing_descent = False
+
+                # --- 步骤 3: 最终到达确认 ---
+                else:
+                    # 平滑移动已结束，现在我们发布最终目标点并等待无人机精确到达。
+                    self.publish_position_setpoint(self.DropArea_x, self.DropArea_y, self.takeoff_target_height)
+
+                    current_x = self.vehicle_local_position.x
+                    current_y = self.vehicle_local_position.y
+                    error = math.sqrt((current_x - self.DropArea_x)**2 + (current_y - self.DropArea_y)**2)
+
+                    if self.log_counter % 10 == 0:
+                        self.get_logger().info(f"正在最后接近投水区... 距离误差: {error:.2f} m")
+
+                    if error < self.nav_threshold:
+                        self.is_AtDropArea = True
+                        self.get_logger().info("已到达投水区！")
 
             if self.is_AtDropArea and not self.is_FinishDrop:
                 if self.mission_state == MissionState.START:
@@ -1235,7 +1307,7 @@ class OffboardControl(Node):
                             end_position = (target_x, target_y, self.takeoff_target_height)
                             
                             # 调用新的辅助函数来启动平滑移动
-                            self._start_smooth_move(end_position)
+                            self._start_smooth_move(end_position, self.smoothing_speed)
 
                             self.mission_state = MissionState.TARGETING_CYCLE
                             # ========================================================
@@ -1352,7 +1424,7 @@ class OffboardControl(Node):
                                 target_x, target_y = next_target['coords_ned']
                                 end_position = (target_x, target_y, self.takeoff_target_height)
                                 # 再次调用新的辅助函数
-                                self._start_smooth_move(end_position)
+                                self._start_smooth_move(end_position, self.smoothing_speed)
 
 
                 elif self.mission_state == MissionState.TIMEOUT_DROP:
@@ -1410,7 +1482,7 @@ class OffboardControl(Node):
 
                             # Use your helper function to start the smooth move
                             end_position = (target_x, target_y, self.takeoff_target_height)
-                            self._start_smooth_move(end_position)
+                            self._start_smooth_move(end_position, self.smoothing_speed)
                             
                             self.mission_state = MissionState.RECON_CYCLE
 
@@ -1480,7 +1552,7 @@ class OffboardControl(Node):
                                 next_target_name, (next_target_x, next_target_y) = next_target['name'], next_target['coords_ned']
                                 self.get_logger().info(f"准备平滑移动至下一个目标: '{next_target_name}'")
                                 end_position = (next_target_x, next_target_y, self.takeoff_target_height)
-                                self._start_smooth_move(end_position)
+                                self._start_smooth_move(end_position, self.smoothing_speed)
 
                 # 状态：MISSION_COMPLETE
                 elif self.mission_state == MissionState.MISSION_COMPLETE:
@@ -1595,7 +1667,7 @@ def main(args=None) -> None:
     parser.add_argument('--camera-hint', type=str, default='imx577',
                         help='Hint to find the camera device name (e.g., "USB", "C920").')
     
-    parser.add_argument('--takeoff-height', type=float, default=-2.1,
+    parser.add_argument('--takeoff-height', type=float, default=-3.1,
                         help='Takeoff height in meters (negative value for altitude).')
     parser.add_argument('--descent-height', type=float, default=1.0,
                         help='Descent height after first alignment in meters (positive value).')
@@ -1616,18 +1688,18 @@ def main(args=None) -> None:
                         help='Time window (seconds) to maintain stability for the first alignment.')
     parser.add_argument('--first-align-check-freq', type=int, default=5,
                         help='Check frequency (how many timer calls per check) for the first alignment.')
-    parser.add_argument('--second-align-threshold', type=float, default=0.10,
+    parser.add_argument('--second-align-threshold', type=float, default=0.001,
                         help='Threshold (distance in meters) for the second alignment.')
     parser.add_argument('--second-align-time-window', type=float, default=3.0,
                         help='Time window (seconds) to maintain stability for the second alignment.')
     parser.add_argument('--second-align-check-freq', type=int, default=5,
                         help='Check frequency (how many timer calls per check) for the second alignment.')    
     
-    parser.add_argument('--drop-phase-timeout', type=float, default=90.0,
+    parser.add_argument('--drop-phase-timeout', type=float, default=90000.0,
                         help='Maximum time in seconds for the entire dropping phase.')
     parser.add_argument('--search-timeout', type=float, default=5.0,
                         help='Maximum time in seconds for each search attempt.')
-    parser.add_argument('--second-align-maxtime', type=float, default=8.0,
+    parser.add_argument('--second-align-maxtime', type=float, default=8888888.0,
                         help='Maximum time in seconds for each search attempt.')
     parser.add_argument('--first-align-maxtime', type=float, default=12.0, 
                         help='Maximum time in seconds for the first alignment phase before forcing a drop.')
@@ -1654,10 +1726,12 @@ def main(args=None) -> None:
     # --- PID 核心参数 ---
     parser.add_argument('--kp', type=float, default=0.9911,
                         help='PID控制器 - 精细调节阶段的P增益 (Kp)。默认: 0.9911.')
-    parser.add_argument('--ki', type=float, default=0.1021,
+    parser.add_argument('--ki', type=float, default=0,
                         help='PID控制器 - 积分增益 (Ki)。默认: 0.1021.')
-    parser.add_argument('--kd', type=float, default=0.0009,
+    parser.add_argument('--kd', type=float, default=0.0000,
                         help='PID控制器 - 微分增益 (Kd)。默认: 0.0009.')
+    parser.add_argument('--kf', type=float, default=0.3,
+                    help='前馈控制器 - 基于速度的阻尼增益 (Kf)。建议范围: 0.1 - 0.5')
 
     # --- PID 行为阈值和限制参数 ---
     parser.add_argument('--max-integral', type=float, default=0.2, # 这个值默认等于 align_maxstep
@@ -1705,6 +1779,10 @@ def main(args=None) -> None:
                         help='Minimum duration (seconds) for any smooth move to ensure stability.')
     parser.add_argument('--max-smoothing-duration', type=float, default=8.0,
                         help='Maximum duration (seconds) for any smooth move to cap long-distance travel time.')
+    
+     # <<< 新增：为初始前飞添加独立的速度参数 >>>
+    parser.add_argument('--forward-flight-speed', type=float, default=3.5,
+                        help='Average speed (m/s) for the initial forward flight to the drop area.')
     
     # 3. 解析参数
     # 使用 rclpy.utilities.remove_ros_args 来确保我们只解析自己的参数，
@@ -1765,9 +1843,6 @@ def main(args=None) -> None:
     print("------------------ 对准阈值 ------------------")
     print(f"  - 首次对准稳定阈值: {custom_args.first_align_threshold} 米, 稳定时长: {custom_args.first_align_time_window} 秒")
     print(f"  - 第二次对准稳定阈值: {custom_args.second_align_threshold} 米, 稳定时长: {custom_args.second_align_time_window} 秒")
-    print("------------------ 模式设置 ------------------")
-    print(f"  - 视频录制: {'已启用' if custom_args.record_video else '已禁用'}")
-    print(f"  - 无头模式 (不显示GUI): {'是' if custom_args.headless else '否'}")
     print("==================================================\n")
     # ##########################################################################
     
