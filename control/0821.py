@@ -829,8 +829,11 @@ class OffboardControl(Node):
                 vel_x_body_frame = velocity_x_ned * math.cos(self.init_yaw) + velocity_y_ned * math.sin(self.init_yaw)
                 vel_y_body_frame = -velocity_x_ned * math.sin(self.init_yaw) + velocity_y_ned * math.cos(self.init_yaw)
                 
-                feedforward_x = self.Kf * vel_x_body_frame
-                feedforward_y = self.Kf * vel_y_body_frame
+                raw_feedforward_x = self.Kf * vel_x_body_frame
+                raw_feedforward_y = self.Kf * vel_y_body_frame
+
+                feedforward_x = max(-self.align_maxstep, min(raw_feedforward_x, self.align_maxstep))
+                feedforward_y = max(-self.align_maxstep, min(raw_feedforward_y, self.align_maxstep))
                 
                 # 📌 PID控制量计算
                 control_x = (self.Kp_fine * error_x + 
