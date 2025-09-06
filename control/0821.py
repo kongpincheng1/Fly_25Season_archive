@@ -1268,7 +1268,7 @@ class OffboardControl(Node):
                                     target_x, target_y = next_target['coords_ned']
                                     end_position = (target_x, target_y, self.takeoff_target_height)
                                     # 再次调用新的辅助函数
-                                    self._start_smooth_move(end_position, self.smoothing_speed)
+                                    self._start_smooth_move(end_position)
                             elif is_second_drop_done:
                                 self.get_logger().info(f"目标 '{current_target_name}' (第2个) 投放完成！")
                                 # 此时不需要再 reset_for_next_target，直接标记总任务完成
