@@ -94,9 +94,11 @@ class OffboardControl(Node):
         ])
         self.dist_coeffs = np.array([0.0, 0.0, 0.0, 0.0, 0.0]) # 假设畸变可以忽略
 
-        # 示例值，请务必替换成你自己的测量结果！
-        CAM_POS_IN_BODY = np.array([0.10, 0.02, 0.08])   # 相机位置 (前, 右, 下) in meters
-        DROPPER_POS_IN_BODY = np.array([0.0, 0.0, 0.15]) # 投放器位置 (前, 右, 下) in meters
+        self.STATIC_OFFSET_X_FRD = args.depthcam_xoffset # 假设这是旧的x_offset (对应机体前方)
+        self.STATIC_OFFSET_Y_FRD = args.depthcam_yoffset  # 假设这是旧的y_offset (对应机体右方)
+        
+        CAM_POS_IN_BODY = np.array([self.STATIC_OFFSET_X_FRD, self.STATIC_OFFSET_Y_FRD, 0.15])   # 相机位置 (前, 右, 下) in meters
+        DROPPER_POS_IN_BODY = np.array([0.0, 0.0, -0.15]) # 投放器位置 (前, 右, 下) in meters
 
         # --- 2. 定义相机安装姿态的旋转矩阵 ---
         # 这个矩阵代表: 相机X->机体-Y, 相机Y->机体X, 相机Z->机体Z
@@ -928,6 +930,29 @@ class OffboardControl(Node):
             # (F) 将NED世界误差向量，转换为FRD机体误差向量，以输入给PID
             error_frd_x, error_frd_y = self.coordinate_NED2FRD_vector(error_ned[0], error_ned[1])
 
+
+            if self.log_counter % 30 == 0: # 大约每秒打印一次，避免刷屏
+            # 1. 计算真实的动态世界偏移量 (NED)
+            #    这是投放器的世界位置 减去 无人机中心的世界位置
+                p_camera_in_body_h = np.array([0, 0, 0, 1]) # 相机坐标系的原点
+                p_camera_in_world_h = T_world_body @ (self.T_body_cam @ p_camera_in_body_h)
+                
+                # --- 2. 计算从“相机”到“投放器”的“总偏移”向量 (在世界坐标系下) ---
+                total_offset_ned = p_dropper_in_world_h[:3] - p_camera_in_world_h[:3]
+                
+                total_offset_ned_D_to_C = -total_offset_ned
+
+                # --- 3. 将这个用于比较的 D->C 向量转换回机体坐标系 ---
+                comparison_offset_frd_x, comparison_offset_frd_y = self.coordinate_NED2FRD_vector(
+                    total_offset_ned_D_to_C[0], total_offset_ned_D_to_C[1]
+                )
+
+                # --- 4. 打印清晰的、定义一致的对比日志 ---
+                self.get_logger().info("--- [补偿向量对比 (机体坐标系 FRD)] ---")
+                self.get_logger().info(f"  [静态补偿值]: Forward={self.STATIC_OFFSET_X_FRD:.4f}, Right={self.STATIC_OFFSET_Y_FRD:.4f}")
+                self.get_logger().info(f"  [动态补偿值]: Forward={comparison_offset_frd_x:.4f}, Right={comparison_offset_frd_y:.4f} (Roll:{math.degrees(self.vehicle_roll):.1f}°, Pitch:{math.degrees(self.vehicle_pitch):.1f}°)")
+                self.get_logger().info("-------------------------------------------")
+
             # === 2. 将精确误差 "喂" 给你的PID控制器 ===
             distance = math.hypot(error_frd_x, error_frd_y)
             
@@ -1755,10 +1780,10 @@ def main(args=None) -> None:
                         help='Maximum time in seconds for the first alignment phase before forcing a drop.')
     
     
-    # parser.add_argument('--depthcam_xoffset', type=float, default=-0.065,
-    #                     help='深度相机的x方向误差.')
-    # parser.add_argument('--depthcam_yoffset', type=float, default=0.033,
-    #                     help='深度相机的y方向误差.')
+    parser.add_argument('--depthcam_xoffset', type=float, default=-0.065,
+                        help='深度相机的x方向误差.')
+    parser.add_argument('--depthcam_yoffset', type=float, default=0.033,
+                        help='深度相机的y方向误差.')
     
     
     parser.add_argument('--trigger-distance', type=float, default=32.5,
