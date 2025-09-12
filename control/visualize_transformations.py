@@ -3,8 +3,8 @@ from scipy.spatial.transform import Rotation as R
 import matplotlib
 matplotlib.use("TkAgg")   # 改成 Tkinter 后端，而不是 Qt
 import matplotlib.pyplot as plt
-import plotly.io as pio
-pio.renderers.default = "browser"
+# import plotly.io as pio
+# pio.renderers.default = "browser"
 
 
 # ==============================================================================

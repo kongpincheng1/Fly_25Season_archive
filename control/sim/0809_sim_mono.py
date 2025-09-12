@@ -21,6 +21,7 @@ import csv
 import argparse # <<< 新增
 import sys      # <<< 新增
 import numpy as np
+from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from rclpy.qos import qos_profile_sensor_data
@@ -82,14 +83,45 @@ class OffboardControl(Node):
         self.target_position_subscriber = self.create_subscription(Point, '/target_position',
                                                                    self.target_position_callback, qos_profile)
         
-
+        self.vehicle_odometry_subscriber = self.create_subscription(
+            VehicleOdometry, '/fmu/out/vehicle_odometry', self.vehicle_odometry_callback, qos_profile)
+        
+        #这是广角相机的内参和畸变参数
         self.camera_matrix = np.array([
             [465.7411193847656, 0., 320.0],
             [0., 465.7411193847656, 240.0],
             [0., 0., 1.]
         ])
-
         self.dist_coeffs = np.array([0.0, 0.0, 0.0, 0.0, 0.0]) # 假设畸变可以忽略
+
+        # 示例值，请务必替换成你自己的测量结果！
+        CAM_POS_IN_BODY = np.array([0.10, 0.02, 0.08])   # 相机位置 (前, 右, 下) in meters
+        DROPPER_POS_IN_BODY = np.array([0.0, 0.0, 0.15]) # 投放器位置 (前, 右, 下) in meters
+
+        # --- 2. 定义相机安装姿态的旋转矩阵 ---
+        # 这个矩阵代表: 相机X->机体-Y, 相机Y->机体X, 相机Z->机体Z
+        R_body_cam = np.array([
+            [ 0.,  -1.,  0.],
+            [ 1.,  0.,  0.],
+            [ 0.,  0.,  1.]
+        ])
+
+        # --- 3. 构建从相机到机体的4x4齐次变换矩阵 T_body_cam ---
+        self.T_body_cam = np.eye(4)
+        self.T_body_cam[:3, :3] = R_body_cam
+        self.T_body_cam[:3, 3] = CAM_POS_IN_BODY
+        self.get_logger().info("从相机->机体的变换矩阵 T_body_cam 已配置。")
+
+        # --- 4. 定义投放器在机体坐标系下的齐次坐标向量 ---
+        self.p_dropper_in_body_h = np.append(DROPPER_POS_IN_BODY, 1)
+        self.get_logger().info("投放器相对机体的位置已配置。")
+        
+        # --- 5. 初始化用于存储完整姿态的变量 ---
+        self.vehicle_roll = 0.0
+        self.vehicle_pitch = 0.0
+        # self.init_yaw 将在后面获取，这里无需初始化
+
+
         self.get_logger().info("相机内参已配置。")
 
         # <<< 新增：从参数获取仿真摄像头话题 >>>
@@ -213,8 +245,8 @@ class OffboardControl(Node):
         self.second_align_maxtime = args.second_align_maxtime
         self.first_align_maxtime = args.first_align_maxtime
 
-        self.depthcam_xoffset = args.depthcam_xoffset
-        self.depthcam_yoffset = args.depthcam_yoffset
+        # self.depthcam_xoffset = args.depthcam_xoffset
+        # self.depthcam_yoffset = args.depthcam_yoffset
 
         self.trigger_distance = args.trigger_distance
         self.position_threshold = args.position_threshold
@@ -404,6 +436,19 @@ class OffboardControl(Node):
     def vehicle_status_callback(self, vehicle_status):
         """Callback function for vehicle_status topic subscriber."""
         self.vehicle_status = vehicle_status
+
+    def vehicle_odometry_callback(self, msg: VehicleOdometry):
+        """Callback to get the drone's full attitude (roll, pitch, yaw)."""
+        # PX4 odometry msg.q is [w, x, y, z]
+        # Scipy Rotation needs [x, y, z, w]
+        q = [msg.q[1], msg.q[2], msg.q[3], msg.q[0]]
+        
+        # 从四元数转换为欧拉角 (roll, pitch, yaw)，单位是弧度
+        (self.vehicle_roll, 
+         self.vehicle_pitch, 
+         _) = R.from_quat(q).as_euler('xyz', degrees=False)
+        # Yaw我们继续使用更稳定的 vehicle_local_position.heading
+
 
     def arm(self):
         """Send an arm command to the vehicle."""
@@ -682,6 +727,17 @@ class OffboardControl(Node):
         x_FRD = (x_NED-self.initial_x)*math.cos(self.init_yaw)+(y_NED-self.initial_y)*math.sin(self.init_yaw)
         y_FRD = -(x_NED-self.initial_x)*math.sin(self.init_yaw)+(y_NED-self.initial_y)*math.cos(self.init_yaw)
         return x_FRD, y_FRD
+    
+
+    def coordinate_NED2FRD_vector(self, vec_ned_x, vec_ned_y):
+        '''
+        将NED坐标系下的2D向量，仅通过旋转，转换为FRD机体坐标系下的2D向量。
+        '''
+        current_yaw = self.vehicle_local_position.heading
+        # 向量变换只涉及旋转，不涉及平移
+        vec_frd_x = vec_ned_x * math.cos(current_yaw) + vec_ned_y * math.sin(current_yaw)
+        vec_frd_y = -vec_ned_x * math.sin(current_yaw) + vec_ned_y * math.cos(current_yaw)
+        return vec_frd_x, vec_frd_y
 
     def coordinate_FRD2NED(self,x,y):
         '''
@@ -848,27 +904,39 @@ class OffboardControl(Node):
         self.target_position.y,
         # 'bucket_type' 和 'alignment_stage' 你可以根据当前状态添加
     ])
-            # ========== 原有控制逻辑 ==========
-            # 获取当前位置
-            current_xned, current_yned = self.vehicle_local_position.x, self.vehicle_local_position.y
-            current_x, current_y = self.coordinate_NED2FRD(current_xned, current_yned)
+            P_cam_h = np.array([self.target_position.x, self.target_position.y, self.target_position.z, 1])
             
-            # 📌 计算相机坐标系误差（考虑相机中心偏移）
-            dx_cam = -self.target_position.y + self.depthcam_xoffset  # 相机中心相对投放中心的Y偏差
-            dy_cam = self.target_position.x + self.depthcam_yoffset  # 相机中心相对投放中心的X偏差
-            distance = math.hypot(dx_cam, dy_cam)
+            # (A) 相机 -> 机体
+            P_target_in_body_h = self.T_body_cam @ P_cam_h
+
+            # (B) 构建动态的 世界 -> 机体 变换矩阵
+            current_yaw = self.vehicle_local_position.heading
+            R_world_body = R.from_euler('xyz', [self.vehicle_roll, self.vehicle_pitch, current_yaw]).as_matrix()
+            T_world_body = np.eye(4)
+            T_world_body[:3, :3] = R_world_body
+            T_world_body[:3, 3] = [self.vehicle_local_position.x, self.vehicle_local_position.y, self.vehicle_local_position.z]
             
-            # 📌 根据误差大小选择控制策略
+            # (C) 机体 -> 世界，得到目标的真实世界坐标
+            P_target_in_world_h = T_world_body @ P_target_in_body_h
+
+            # (D) 计算投放器在世界坐标系下的绝对位置
+            p_dropper_in_world_h = T_world_body @ self.p_dropper_in_body_h
+
+            # (E) 计算控制误差：目标的真实世界位置 - 投放器的真实世界位置
+            error_ned = P_target_in_world_h[:3] - p_dropper_in_world_h[:3]
+            
+            # (F) 将NED世界误差向量，转换为FRD机体误差向量，以输入给PID
+            error_frd_x, error_frd_y = self.coordinate_NED2FRD_vector(error_ned[0], error_ned[1])
+
+            # === 2. 将精确误差 "喂" 给你的PID控制器 ===
+            distance = math.hypot(error_frd_x, error_frd_y)
+            
             if distance < self.epsilon:
-                # ——————— 细调阶段：PID控制 ———————
-                if self.log_counter % 10 == 0:
-                    self.get_logger().info(f"PID细调阶段 - 误差:{distance:.3f}m < 阈值:{self.epsilon:.3f}m")
-                
-                # 计算误差项
-                error_x = dx_cam
-                error_y = dy_cam
-                
-                # 📌 积分项计算（带限幅防饱和）
+                # ——— PID细调阶段 (使用新的精确误差) ———
+                if self.log_counter % 10 == 0: self.get_logger().info(f"PID细调阶段 - 精确误差:{distance:.3f}m")
+                error_x = error_frd_x
+                error_y = error_frd_y
+                # ... (你的PIDF计算逻辑完全不变) ...
                 self.integral_x += error_x * self.dt
                 self.integral_y += error_y * self.dt
                 # 积分限幅
@@ -878,30 +946,13 @@ class OffboardControl(Node):
                 # 📌 微分项计算
                 derivative_x = (error_x - self.last_error_x) / self.dt
                 derivative_y = (error_y - self.last_error_y) / self.dt
-                
-                velocity_x_ned = self.vehicle_local_position.vx  # X速度 (North)
-                velocity_y_ned = self.vehicle_local_position.vy  # Y速度 (East)
-                
-                # 2. 将NED速度转换为机体FRD坐标系，以匹配控制误差的坐标系
-                # (速度矢量转换只需要旋转，不需要平移)
-                vel_x_body_frame = velocity_x_ned * math.cos(self.init_yaw) + velocity_y_ned * math.sin(self.init_yaw)
-                vel_y_body_frame = -velocity_x_ned * math.sin(self.init_yaw) + velocity_y_ned * math.cos(self.init_yaw)
-
-                # 3. 计算前馈控制量 (一个与当前速度方向相反的“刹车”力)
+                velocity_x_ned = self.vehicle_local_position.vx
+                velocity_y_ned = self.vehicle_local_position.vy
+                vel_x_body_frame, vel_y_body_frame = self.coordinate_NED2FRD_vector(velocity_x_ned, velocity_y_ned)
                 feedforward_x = self.Kf * vel_x_body_frame
                 feedforward_y = self.Kf * vel_y_body_frame
-
-                # 📌 PID控制量计算
-                control_x = (self.Kp_fine * error_x + 
-                           self.Ki * self.integral_x + 
-                           self.Kd * derivative_x -   # <<< 注意是减号!
-                           feedforward_x)
-                control_y = (self.Kp_fine * error_y + 
-                           self.Ki * self.integral_y + 
-                           self.Kd * derivative_y -   # <<< 注意是减号!
-                           feedforward_y)
-                
-                # 保存本次误差用于下次微分计算
+                control_x = (self.Kp_fine * error_x + self.Ki * self.integral_x + self.Kd * derivative_x - feedforward_x)
+                control_y = (self.Kp_fine * error_y + self.Ki * self.integral_y + self.Kd * derivative_y - feedforward_y)
                 self.last_error_x = error_x
                 self.last_error_y = error_y
                 
@@ -918,30 +969,20 @@ class OffboardControl(Node):
                 
                 # 📌 饱和比例控制
                 scale = self.align_maxstep / distance
-                control_x = dx_cam * scale
-                control_y = dy_cam * scale
-                
-                # 清零PID状态，避免积累
-                self.integral_x = 0.0
-                self.integral_y = 0.0
-                self.last_error_x = 0.0
-                self.last_error_y = 0.0
-                
-                if self.log_counter % 10 == 0:
-                    self.get_logger().info(f"饱和P输出: scale={scale:.3f}, 最大步长={self.align_maxstep:.3f}m")
-            
-            # ============== 目标位置计算 ==============
-            # 计算FRD目标位置
-            target_x_FRD = current_x + control_x
-            target_y_FRD = current_y + control_y
-            
-            # 转换为NED坐标
+                control_x = error_frd_x * scale
+                control_y = error_frd_y * scale
+                self.integral_x, self.integral_y, self.last_error_x, self.last_error_y = 0.0, 0.0, 0.0, 0.0
+
+            # === 3. [不变部分] 计算并发布目标点 ===
+            current_x_frd, current_y_frd = self.coordinate_NED2FRD(self.vehicle_local_position.x, self.vehicle_local_position.y)
+            target_x_FRD = current_x_frd + control_x
+            target_y_FRD = current_y_frd + control_y
             target_x_NED, target_y_NED = self.coordinate_FRD2NED(target_x_FRD, target_y_FRD)
             
-            # 精确目标位置（用于对准检查）
-            precise_target_x_FRD = current_x + dx_cam
-            precise_target_y_FRD = current_y + dy_cam
-            precise_target_x_NED, precise_target_y_NED = self.coordinate_FRD2NED(precise_target_x_FRD, precise_target_y_FRD)
+            # === 4. [修改部分] 计算用于对准检查的精确目标点 ===
+            # 检查点 = 无人机当前位置 + NED误差向量 (即我们希望无人机飞到的位置)
+            precise_target_x_NED = self.vehicle_local_position.x + error_ned[0]
+            precise_target_y_NED = self.vehicle_local_position.y + error_ned[1]
             
             # ============== 两次对准逻辑 ==============
             # First alignment
@@ -1714,10 +1755,10 @@ def main(args=None) -> None:
                         help='Maximum time in seconds for the first alignment phase before forcing a drop.')
     
     
-    parser.add_argument('--depthcam_xoffset', type=float, default=-0.065,
-                        help='深度相机的x方向误差.')
-    parser.add_argument('--depthcam_yoffset', type=float, default=0.033,
-                        help='深度相机的y方向误差.')
+    # parser.add_argument('--depthcam_xoffset', type=float, default=-0.065,
+    #                     help='深度相机的x方向误差.')
+    # parser.add_argument('--depthcam_yoffset', type=float, default=0.033,
+    #                     help='深度相机的y方向误差.')
     
     
     parser.add_argument('--trigger-distance', type=float, default=32.5,
