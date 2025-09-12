@@ -238,7 +238,7 @@ class OffboardControl(Node):
         self.search_start_time = None
 
         self.last_target_update_time = None
-        self.target_timeout_duration = 1.0  # 目标信息超时秒数，例如1秒。可以设为命令行参数。
+        self.target_timeout_duration = 0.5  # 目标信息超时秒数，例如1秒。可以设为命令行参数。
         
         
         ### 新增: 用于稳定建图的数据收集变量 ###

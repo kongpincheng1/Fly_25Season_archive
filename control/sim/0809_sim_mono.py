@@ -369,7 +369,7 @@ class OffboardControl(Node):
         self.is_hovering_at_recon_point = False  # 是否正在悬停侦察的标志
 
         self.last_target_update_time = None
-        self.target_timeout_duration = 1.0
+        self.target_timeout_duration = 1.0   # 话题过期时间。
 
 
 
