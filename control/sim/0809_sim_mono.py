@@ -287,6 +287,8 @@ class OffboardControl(Node):
         self.is_AtDropArea = False
         self.is_FinishDrop = False
 
+        self.reached_align_height = False
+
 
         self.postdrop_waiting_x = None
         self.postdrop_waiting_y = None
@@ -1060,24 +1062,7 @@ class OffboardControl(Node):
                 if self.log_counter % 25 == 0:
                     self.get_logger().info("执行第一次对准")
                 self.fly_to_position(target_x_NED, target_y_NED, self.takeoff_target_height)
-
-                current_z = self.vehicle_local_position.z
-                target_z = self.takeoff_target_height
-                altitude_error = abs(current_z - target_z)
-
-                if altitude_error < self.alignment_altitude_threshold:
-                    # 只有在到达正确高度后，才开始检查X/Y对准
-                    if self.log_counter % 25 == 0:
-                        self.get_logger().info("已到达第一对准高度，开始检查X/Y对准...")
-                    self.first_alignment_check(precise_target_x_NED, precise_target_y_NED)
-                else:
-                    # 如果还未到达高度，则不检查，并可选择性打印日志
-                    if self.log_counter % 25 == 0: # 降低日志频率
-                        self.get_logger().info(f"正在前往第一对准高度... "
-                                               f"当前高度: {current_z:.2f}, 目标高度: {target_z:.2f}, 误差: {altitude_error:.2f}m")
-
-
-                # self.first_alignment_check(precise_target_x_NED, precise_target_y_NED)
+                self.first_alignment_check(precise_target_x_NED, precise_target_y_NED)
                 self.last_found_x_NED = self.vehicle_local_position.x
                 self.last_found_y_NED = self.vehicle_local_position.y
                 self.last_found_z_NED = self.takeoff_target_height
@@ -1092,17 +1077,12 @@ class OffboardControl(Node):
                 target_z = self.takeoff_target_height + self.afterAlign_descentHeight
                 altitude_error = abs(current_z - target_z)
 
-                if altitude_error < self.alignment_altitude_threshold:
-                    # 只有在到达正确高度后，才开始检查X/Y对准
-                    if self.log_counter % 25 == 0:
-                        self.get_logger().info("已到达第二对准高度，开始检查X/Y对准...")
-                    self.second_alignment_check(precise_target_x_NED, precise_target_y_NED)
+                if not self.reached_align_height:
+                    if altitude_error < self.alignment_altitude_threshold:
+                        self.reached_align_height = True
+                        self.get_logger().warn(f"高度达到，检查对准精度")
                 else:
-                    # 如果还未到达高度，则不检查，并可选择性打印日志
-                    if self.log_counter % 25 == 0: # 降低日志频率
-                        self.get_logger().info(f"正在前往第二对准高度... "
-                                               f"当前高度: {current_z:.2f}, 目标高度: {target_z:.2f}, 误差: {altitude_error:.2f}m")
-                        
+                    self.second_alignment_check(precise_target_x_NED, precise_target_y_NED)        
 
                 self.last_found_x_NED = self.vehicle_local_position.x
                 self.last_found_y_NED = self.vehicle_local_position.y
@@ -1125,6 +1105,7 @@ class OffboardControl(Node):
                     
                     ### MODIFIED ###
                     # 进入投放后等待状态，而不是直接重置
+                    self.reached_align_height = False
                     self.is_final_aligning = False
                     self.is_waiting_post_drop = True
                     self.post_drop_start_time = self.get_clock().now()
@@ -1146,6 +1127,7 @@ class OffboardControl(Node):
                     
                     ### MODIFIED ###
                     # 进入投放后等待状态，而不是直接重置
+                    self.reached_align_height = False
                     self.is_final_aligning = False
                     self.is_waiting_post_drop = True
                     self.post_drop_start_time = self.get_clock().now()
@@ -1709,7 +1691,7 @@ class OffboardControl(Node):
                 cv2.imshow("Drone View", self.latest_annotated_frame)
                 cv2.waitKey(1)
         elasped_timer_time = (self.get_clock().now() - timer_start).nanoseconds / 1e9
-        if self.offboard_setpoint_counter % 50 == 0:
+        if self.offboard_setpoint_counter % 150 == 0:
             self.get_logger().info(f"控制循环花费时间：{elasped_timer_time:.5f}s")
         
     def vision_timer_callback(self):
@@ -1752,7 +1734,7 @@ class OffboardControl(Node):
         self.latest_annotated_frame = annotated_frame
 
         elasped_timer_time = (self.get_clock().now() - timer_start).nanoseconds / 1e9
-        if self.offboard_setpoint_counter % 50 == 0:
+        if self.offboard_setpoint_counter % 150 == 0:
             self.get_logger().info(f"视觉循环花费时间：{elasped_timer_time:.5f}")
 
 
@@ -1775,12 +1757,12 @@ def main(args=None) -> None:
     
     parser.add_argument('--takeoff-height', type=float, default=-2.8,
                         help='Takeoff height in meters (negative value for altitude).')
-    parser.add_argument('--descent-height', type=float, default=1.0,
+    parser.add_argument('--descent-height', type=float, default=0.8,
                         help='Descent height after first alignment in meters (positive value).')
     
     parser.add_argument('--forward-x', type=float, default=2.5,
                         help='Forward distance to fly to the drop area in meters.')
-    parser.add_argument('--search-height', type=float, default=-5.0,
+    parser.add_argument('--search-height', type=float, default=-4.0,
                         help='Global search height in meters (negative value for altitude).')
    
     parser.add_argument('--align-maxstep', type=float, default=0.2,
@@ -1794,18 +1776,18 @@ def main(args=None) -> None:
                         help='Time window (seconds) to maintain stability for the first alignment.')
     parser.add_argument('--first-align-check-freq', type=int, default=5,
                         help='Check frequency (how many timer calls per check) for the first alignment.')
-    parser.add_argument('--second-align-threshold', type=float, default=0.11,
+    parser.add_argument('--second-align-threshold', type=float, default=0.003,
                         help='Threshold (distance in meters) for the second alignment.')
     parser.add_argument('--second-align-time-window', type=float, default=3.0,
                         help='Time window (seconds) to maintain stability for the second alignment.')
     parser.add_argument('--second-align-check-freq', type=int, default=5,
                         help='Check frequency (how many timer calls per check) for the second alignment.')    
     
-    parser.add_argument('--drop-phase-timeout', type=float, default=80,
+    parser.add_argument('--drop-phase-timeout', type=float, default=8000,
                         help='Maximum time in seconds for the entire dropping phase.')
     parser.add_argument('--search-timeout', type=float, default=5.0,
                         help='Maximum time in seconds for each search attempt.')
-    parser.add_argument('--second-align-maxtime', type=float, default=10,
+    parser.add_argument('--second-align-maxtime', type=float, default=1000,
                         help='Maximum time in seconds for each search attempt.')
     parser.add_argument('--first-align-maxtime', type=float, default=5, 
                         help='Maximum time in seconds for the first alignment phase before forcing a drop.')
@@ -1830,13 +1812,13 @@ def main(args=None) -> None:
 
 
     # --- PID 核心参数 ---
-    parser.add_argument('--kp', type=float, default=0.9911,
+    parser.add_argument('--kp', type=float, default=0.5,
                         help='PID控制器 - 精细调节阶段的P增益 (Kp)。默认: 0.9911.')
-    parser.add_argument('--ki', type=float, default=0,
+    parser.add_argument('--ki', type=float, default=0.0,
                         help='PID控制器 - 积分增益 (Ki)。默认: 0.1021.')
     parser.add_argument('--kd', type=float, default=0.0000,
                         help='PID控制器 - 微分增益 (Kd)。默认: 0.0009.')
-    parser.add_argument('--kf', type=float, default=0.3,
+    parser.add_argument('--kf', type=float, default=0.0,
                     help='前馈控制器 - 基于速度的阻尼增益 (Kf)。建议范围: 0.1 - 0.5')
 
     # --- PID 行为阈值和限制参数 ---
