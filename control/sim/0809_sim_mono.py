@@ -46,6 +46,7 @@ class MissionState(Enum):
 
     # === 阶段 2: 侦察任务 ===
     TRANSIT_TO_RECON_OFFBOARD = 9     # 到达侦察区，准备切换回Offboard
+    RETURN_TO_CENTER_DROPAREA = 10
     RECON_SEARCH = 12                     # 在侦察区进行视觉搜索
     RECON_CYCLE = 13                      # 按顺序飞到每个侦察点
     
@@ -1542,7 +1543,18 @@ class OffboardControl(Node):
             if self.is_FinishDrop:
                 if self.mission_state.value < MissionState.TRANSIT_TO_RECON_OFFBOARD.value:
                     self.get_logger().info("所有载荷投放完毕，准备在Offboard模式下飞往侦察区域...")
-                    
+
+                    #回到投放区中心
+                    self.publish_position_setpoint(self.DropArea_x,self.DropArea_y,self.takeoff_target_height)
+                    error_2_center_DropArea = math.sqrt((self.vehicle_local_position.x-self.DropArea_x)**2+(self.vehicle_local_position.y-self.DropArea_y)**2+(self.vehicle_local_position.z-self.takeoff_target_height)**2)
+                    if error_2_center_DropArea < 0.5 :
+                        self.get_logger().info("已回到投放区中心")
+                        self.mission_state = MissionState.RETURN_TO_CENTER_DROPAREA
+                    else:
+                        return
+                        
+                   
+                if self.mission_state == MissionState.RETURN_TO_CENTER_DROPAREA:
                     # 1. 计算侦察区的目标点 (在当前位置的基础上向前飞)
                     # 注意：我们使用 coordinate_FRD2NED 函数，它会基于飞机的初始朝向 (init_yaw) 进行计算
                     # 首先获取飞机当前在初始FRD坐标系下的位置
@@ -1550,8 +1562,7 @@ class OffboardControl(Node):
                     # 计算目标FRD坐标
                     target_recon_x_frd = self.forward_x + self.recon_forward_distance # 向前飞
                     target_recon_y_frd = 0 # 侧向不变
-
-                    # 将目标FRD坐标转换为全局NED坐标
+                     # 将目标FRD坐标转换为全局NED坐标
                     target_recon_x_ned, target_recon_y_ned = self.coordinate_FRD2NED(
                         target_recon_x_frd,
                         target_recon_y_frd
@@ -1571,7 +1582,7 @@ class OffboardControl(Node):
 
                 # <<< MODIFIED: 只有需要在 OFFBOARD 模式下执行的侦察逻辑才留在这里 >>>
                 # 状态：RECON_AREA_SWITCH_TO_OFFBOARD
-                if self.mission_state == MissionState.TRANSIT_TO_RECON_OFFBOARD:
+                elif self.mission_state == MissionState.TRANSIT_TO_RECON_OFFBOARD:
                     self.get_logger().info("已成功切换回Offboard模式，开始侦察搜索。")
                     self.mission_state = MissionState.RECON_SEARCH
 
