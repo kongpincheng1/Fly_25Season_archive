@@ -227,6 +227,14 @@ class OffboardControl(Node):
         self.alignment_altitude_threshold = args.alignment_altitude_threshold
 
 
+        # <<< 新增：从命令行参数初始化侦察任务参数 >>>
+        self.recon_search_height = args.recon_search_height
+        self.recon_search_timeout = args.recon_search_timeout
+        self.recon_hover_time = args.recon_hover_time
+        self.recon_nav_threshold = args.recon_nav_threshold
+
+        self.recon_forward_distance = args.recon_forward_distance
+
 
         self.global_search_target_z = None
 
@@ -1605,6 +1613,20 @@ def main(args=None) -> None:
                         default=[1, 3, 2], # 默认顺序: 中(2), 左(1), 右(3)
                         help='设置目标的投放顺序。使用数字: 1=左, 2=中, 3=右。 '
                              '例如: --target-order 3 1 2')
+    
+    # === 新增：为侦察任务添加参数 ===
+    parser.add_argument('--recon-search-height', type=float, default=-5.0,
+                        help='执行第二次（侦察）视觉搜索时的高度（米）。')
+    parser.add_argument('--recon-search-timeout', type=float, default=5.0,
+                        help='侦察阶段视觉搜索的持续时间（秒）。')
+    parser.add_argument('--recon-hover-time', type=float, default=3.0,
+                        help='到达每个侦察圆筒上方后的悬停侦察时间（秒）。')
+    parser.add_argument('--recon-nav-threshold', type=float, default=0.5,
+                        help='判断无人机到达侦察点的误差阈值（米）。')
+    
+    parser.add_argument('--recon-forward-distance', type=float, default=6.0,
+                        help='投水完成后，在Offboard模式下向前飞行以到达侦察区的距离（米）。')
+    
     
     # <<< 新增：动态平滑移动的参数 >>>
     parser.add_argument('--smoothing-speed', type=float, default=1.5,
