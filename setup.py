@@ -26,6 +26,7 @@ setup(
             'test = control.sim.0809_sim_mono:main',
             '0821 = control.0821:main',
             '0821auto = control.0821auto:main',
+            '0821auto_2 = control.0821auto:main',
             'servo = control.servo_test:main',
         ],
     },
