@@ -224,11 +224,9 @@ class OffboardControl(Node):
         self.second_align_maxtime = args.second_align_maxtime
         self.first_align_maxtime = args.first_align_maxtime
 
-        # self.depthcam_xoffset = args.depthcam_xoffset
-        # self.depthcam_yoffset = args.depthcam_yoffset
+        self.alignment_altitude_threshold = args.alignment_altitude_threshold
 
-        self.trigger_distance = args.trigger_distance
-        self.position_threshold = args.position_threshold
+
 
         self.global_search_target_z = None
 
@@ -253,6 +251,8 @@ class OffboardControl(Node):
         self.is_AtTakeoffHeight = False
         self.is_AtDropArea = False
         self.is_FinishDrop = False
+
+        self.reached_align_height = False
 
 
         self.postdrop_waiting_x = None
@@ -421,6 +421,11 @@ class OffboardControl(Node):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
         self.get_logger().info("Switching to land mode")
 
+    def return_to_launch(self):
+        """Switch to RTL mode."""
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH)
+        self.get_logger().info("Switching to Return-to-Launch (RTL) mode")
+
     def publish_offboard_control_heartbeat_signal(self):
         """Publish the offboard control mode."""
         msg = OffboardControlMode()
@@ -587,7 +592,7 @@ class OffboardControl(Node):
         current_height = self.vehicle_local_position.z
         height_error = abs(current_height - self.takeoff_target_height)
         # 为了减少日志输出，只有每隔一定周期时才打印此日志
-        if self.log_counter % 10 == 0:
+        if self.log_counter % 25 == 0:
             self.get_logger().info(f"当前高度：{current_height:.2f} 米，目标高度：{self.takeoff_target_height:.2f} 米，高度误差：{height_error:.2f} 米")
         if height_error < self.takeoff_threshold:
             self.is_AtTakeoffHeight = True
@@ -615,7 +620,7 @@ class OffboardControl(Node):
         current_y = self.vehicle_local_position.y
         error = math.sqrt((current_x - self.DropArea_x)**2 + (current_y - self.DropArea_y)**2)
 
-        if self.log_counter % 10 == 0:
+        if self.log_counter % 25 == 0:
             self.get_logger().info(f"导航至投水区... "
                                    f"当前:({current_x:.2f}, {current_y:.2f}), "
                                    f"目标:({self.DropArea_x:.2f}, {self.DropArea_y:.2f}), "
@@ -661,8 +666,6 @@ class OffboardControl(Node):
         y_target = x*math.sin(self.init_yaw)+y*math.cos(self.init_yaw) + self.initial_y
         z_target = z
         self.publish_position_setpoint(x_target, y_target, z_target)
-        if self.log_counter % 10 == 0:
-            self.get_logger().info(f"Flying to FRDposition: x={x}, y={y}, z={z}")
         return x_target, y_target
 
     def coordinate_NED2FRD(self,x_NED,y_NED):
@@ -771,7 +774,7 @@ class OffboardControl(Node):
             if elapsed_time < self.target_timeout_duration:
                 is_target_valid = True
             else:
-                if self.log_counter % 30 == 0:
+                if self.log_counter % 25 == 0:
                     self.get_logger().warn(f"目标信息已超时 ({elapsed_time:.2f}s > {self.target_timeout_duration}s)，将忽略旧目标。")
                     
         is_in_second_alignment = self.first_alignment_complete and not self.second_alignment_complete
@@ -788,24 +791,45 @@ class OffboardControl(Node):
 
             # 检查是否超时
             if elapsed_first_align_time > self.first_align_maxtime:
-                self.get_logger().warn(f"第一次对准超时 ({elapsed_first_align_time:.1f}s > {self.first_align_maxtime}s)，强制执行投放！")
-                if not self.is_drop_initiated_for_current_target:
-                    # 执行投放逻辑（与第二次对准超时投放逻辑相同）
-                    if self.current_dropping_state[1] == DroppingState.IDLE and not self.Is_Finish_1st_Drop:
-                        self.drop_payload(1)
-                        self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
-                    elif self.current_dropping_state[2] == DroppingState.IDLE and self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop:
-                        self.drop_payload(2)
-                        self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
-                        
-                    self.first_align_start_timestamp = None # 重置计时器
+                if self.current_dropping_state[1] == DroppingState.IDLE and not self.Is_Finish_1st_Drop:
+                    self.drop_payload(1) # 启动第一次投水
+                    self.is_drop_initiated_for_current_target = True
+                    self.second_align_start_timestamp = None
 
+                    self.postdrop_waiting_x = self.vehicle_local_position.x
+                    self.postdrop_waiting_y = self.vehicle_local_position.y
+                    self.postdrop_waiting_z = self.vehicle_local_position.z
+
+                    self.get_logger().warn(f"进行目标1超时投放！")
+                    self.get_logger().info(f"将在原地悬停 {self.post_drop_delay} 秒...")
                     
-                    # 关键：强制设置第一次对准完成，以便任务流程能够继续
-                    self.first_alignment_complete = True
-                    self.second_alignment_checker.reset() # 第一次对准已“完成”（即使是超时），为第二次对准重置检查器
+                    ### MODIFIED ###
+                    # 进入投放后等待状态，而不是直接重置
+                    self.is_final_aligning = False
+                    self.is_waiting_post_drop = True
+                    self.post_drop_start_time = self.get_clock().now()
+                    return
+
                 
-                return # 既然已经超时投放，直接结束本次函数调用
+                elif self.current_dropping_state[2] == DroppingState.IDLE and self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop:
+                    self.drop_payload(2) # 启动第二次投水
+                    self.is_drop_initiated_for_current_target = True
+                    self.second_align_start_timestamp = None
+
+                    self.postdrop_waiting_x = self.vehicle_local_position.x
+                    self.postdrop_waiting_y = self.vehicle_local_position.y
+                    self.postdrop_waiting_z = self.vehicle_local_position.z
+
+                    self.get_logger().warn(f"进行目标2超时投放！")
+                    self.get_logger().info(f"将在原地悬停 {self.post_drop_delay} 秒...")
+                    
+                    ### MODIFIED ###
+                    # 进入投放后等待状态，而不是直接重置
+                    self.is_final_aligning = False
+                    self.is_waiting_post_drop = True
+                    self.post_drop_start_time = self.get_clock().now()
+
+                    return
         
         # 如果正处于第二次对准阶段，无条件检查超时
         if is_in_second_alignment:
@@ -819,23 +843,45 @@ class OffboardControl(Node):
             
             # 检查是否超时
             if elapsed_drop_time > self.second_align_maxtime:
-                self.get_logger().warn(f"第二次对准超时 ({elapsed_drop_time:.1f}s > {self.second_align_maxtime}s)，强制执行投放！")
-                if not self.is_drop_initiated_for_current_target:
-                    # <<< 开始投放逻辑 (从原代码中移动至此) >>> tag:第二次对准超时投水
-                    if self.current_dropping_state[1] == DroppingState.IDLE and not self.Is_Finish_1st_Drop:
-                        self.drop_payload(1)
-                        self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
-                        
-                    elif self.current_dropping_state[2] == DroppingState.IDLE and self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop:
-                        self.drop_payload(2)
-                        self.get_logger().info("——————————————————————DROP (TIMEOUT)————————————————————————")
-                    
-                    
-                    self.second_align_start_timestamp = None # 重置计时器
+                if self.current_dropping_state[1] == DroppingState.IDLE and not self.Is_Finish_1st_Drop:
+                    self.drop_payload(1) # 启动第一次投水
+                    self.is_drop_initiated_for_current_target = True
+                    self.second_align_start_timestamp = None
 
-                # <<< 投放逻辑结束 >>>
+                    self.postdrop_waiting_x = self.vehicle_local_position.x
+                    self.postdrop_waiting_y = self.vehicle_local_position.y
+                    self.postdrop_waiting_z = self.vehicle_local_position.z
 
-                return # 既然已经超时投放，直接结束本次函数调用
+                    self.get_logger().warn(f"进行目标1超时投放！")
+                    self.get_logger().info(f"将在原地悬停 {self.post_drop_delay} 秒...")
+                    
+                    ### MODIFIED ###
+                    # 进入投放后等待状态，而不是直接重置
+                    self.is_final_aligning = False
+                    self.is_waiting_post_drop = True
+                    self.post_drop_start_time = self.get_clock().now()
+                    return
+
+                
+                elif self.current_dropping_state[2] == DroppingState.IDLE and self.Is_Finish_1st_Drop and not self.Is_Finish_2nd_Drop:
+                    self.drop_payload(2) # 启动第二次投水
+                    self.is_drop_initiated_for_current_target = True
+                    self.second_align_start_timestamp = None
+
+                    self.postdrop_waiting_x = self.vehicle_local_position.x
+                    self.postdrop_waiting_y = self.vehicle_local_position.y
+                    self.postdrop_waiting_z = self.vehicle_local_position.z
+
+                    self.get_logger().warn(f"进行目标2超时投放！")
+                    self.get_logger().info(f"将在原地悬停 {self.post_drop_delay} 秒...")
+                    
+                    ### MODIFIED ###
+                    # 进入投放后等待状态，而不是直接重置
+                    self.is_final_aligning = False
+                    self.is_waiting_post_drop = True
+                    self.post_drop_start_time = self.get_clock().now()
+
+                    return
             
       
         if is_target_valid:
@@ -871,7 +917,7 @@ class OffboardControl(Node):
             error_frd_x, error_frd_y = self.coordinate_NED2FRD_vector(error_ned[0], error_ned[1])
 
 
-            if self.log_counter % 30 == 0: # 大约每秒打印一次，避免刷屏
+            if self.log_counter % 25 == 0: # 大约每秒打印一次，避免刷屏
             # 1. 计算真实的动态世界偏移量 (NED)
             #    这是投放器的世界位置 减去 无人机中心的世界位置
                 p_camera_in_body_h = np.array([0, 0, 0, 1]) # 相机坐标系的原点
@@ -887,18 +933,18 @@ class OffboardControl(Node):
                     total_offset_ned_D_to_C[0], total_offset_ned_D_to_C[1]
                 )
 
-                # --- 4. 打印清晰的、定义一致的对比日志 ---
-                self.get_logger().info("--- [补偿向量对比 (机体坐标系 FRD)] ---")
-                self.get_logger().info(f"  [静态补偿值]: Forward={self.STATIC_OFFSET_X_FRD:.4f}, Right={self.STATIC_OFFSET_Y_FRD:.4f}")
-                self.get_logger().info(f"  [动态补偿值]: Forward={comparison_offset_frd_x:.4f}, Right={comparison_offset_frd_y:.4f} (Roll:{math.degrees(self.vehicle_roll):.1f}°, Pitch:{math.degrees(self.vehicle_pitch):.1f}°)")
-                self.get_logger().info("-------------------------------------------")
+                # # --- 4. 打印清晰的、定义一致的对比日志 ---
+                # self.get_logger().info("--- [补偿向量对比 (机体坐标系 FRD)] ---")
+                # self.get_logger().info(f"  [静态补偿值]: Forward={self.STATIC_OFFSET_X_FRD:.4f}, Right={self.STATIC_OFFSET_Y_FRD:.4f}")
+                # self.get_logger().info(f"  [动态补偿值]: Forward={comparison_offset_frd_x:.4f}, Right={comparison_offset_frd_y:.4f} (Roll:{math.degrees(self.vehicle_roll):.1f}°, Pitch:{math.degrees(self.vehicle_pitch):.1f}°)")
+                # self.get_logger().info("-------------------------------------------")
 
             # === 2. 将精确误差 "喂" 给你的PID控制器 ===
             distance = math.hypot(error_frd_x, error_frd_y)
             
             if distance < self.epsilon:
                 # ——— PID细调阶段 (使用新的精确误差) ———
-                if self.log_counter % 10 == 0: self.get_logger().info(f"PID细调阶段 - 精确误差:{distance:.3f}m")
+                if self.log_counter % 25 == 0: self.get_logger().info(f"PID细调阶段 - 精确误差:{distance:.3f}m")
                 error_x = error_frd_x
                 error_y = error_frd_y
                 # ... (你的PIDF计算逻辑完全不变) ...
@@ -921,7 +967,7 @@ class OffboardControl(Node):
                 self.last_error_x = error_x
                 self.last_error_y = error_y
                 
-                if self.log_counter % 10 == 0:
+                if self.log_counter % 25 == 0:
                     p_term = self.Kp_fine * error_x
                     i_term = self.Ki * self.integral_x
                     d_term = self.Kd * derivative_x
@@ -929,7 +975,7 @@ class OffboardControl(Node):
                     self.get_logger().info(f"PIDF输出: P={p_term:.3f}, I={i_term:.3f}, D={d_term:.3f}, F={f_term:.3f}")
             else:
                 # ——————— 大误差阶段：饱和P控制 ———————
-                if self.log_counter % 10 == 0:
+                if self.log_counter % 25 == 0:
                     self.get_logger().info(f"饱和P控制阶段 - 误差:{distance:.3f}m >= 阈值:{self.epsilon:.3f}m")
                 
                 # 📌 饱和比例控制
@@ -952,21 +998,33 @@ class OffboardControl(Node):
             # ============== 两次对准逻辑 ==============
             # First alignment
             if not self.first_alignment_complete:
-                if self.log_counter % 10 == 0:
+                if self.log_counter % 25 == 0:
                     self.get_logger().info("执行第一次对准")
                 self.fly_to_position(target_x_NED, target_y_NED, self.takeoff_target_height)
                 self.first_alignment_check(precise_target_x_NED, precise_target_y_NED)
-                self.last_found_x_NED = target_x_NED
-                self.last_found_y_NED = target_y_NED
+                self.last_found_x_NED = self.vehicle_local_position.x
+                self.last_found_y_NED = self.vehicle_local_position.y
                 self.last_found_z_NED = self.takeoff_target_height
 
             elif self.first_alignment_complete and not self.second_alignment_complete:
-                if self.log_counter % 10 == 0:
+                if self.log_counter % 25 == 0:
                     self.get_logger().info("执行第二次精确对准")
                 self.fly_to_position(target_x_NED, target_y_NED, self.takeoff_target_height + self.afterAlign_descentHeight)
-                self.second_alignment_check(precise_target_x_NED, precise_target_y_NED)
-                self.last_found_x_NED = target_x_NED
-                self.last_found_y_NED = target_y_NED
+
+                # <<< 新增：高度门控 >>>
+                current_z = self.vehicle_local_position.z
+                target_z = self.takeoff_target_height + self.afterAlign_descentHeight
+                altitude_error = abs(current_z - target_z)
+
+                if not self.reached_align_height:
+                    if altitude_error < self.alignment_altitude_threshold:
+                        self.reached_align_height = True
+                        self.get_logger().warn(f"高度达到，检查对准精度")
+                else:
+                    self.second_alignment_check(precise_target_x_NED, precise_target_y_NED)        
+
+                self.last_found_x_NED = self.vehicle_local_position.x
+                self.last_found_y_NED = self.vehicle_local_position.y
                 self.last_found_z_NED = self.takeoff_target_height + self.afterAlign_descentHeight
             
             # ============== 投水逻辑 ==============
@@ -986,6 +1044,7 @@ class OffboardControl(Node):
                     
                     ### MODIFIED ###
                     # 进入投放后等待状态，而不是直接重置
+                    self.reached_align_height = False
                     self.is_final_aligning = False
                     self.is_waiting_post_drop = True
                     self.post_drop_start_time = self.get_clock().now()
@@ -1007,6 +1066,7 @@ class OffboardControl(Node):
                     
                     ### MODIFIED ###
                     # 进入投放后等待状态，而不是直接重置
+                    self.reached_align_height = False
                     self.is_final_aligning = False
                     self.is_waiting_post_drop = True
                     self.post_drop_start_time = self.get_clock().now()
@@ -1018,11 +1078,11 @@ class OffboardControl(Node):
         else:
             # ============== 无目标时的处理 ==============
             if self.last_found_x_NED and self.last_found_y_NED and self.last_found_z_NED:
-                if self.log_counter % 30 == 0:
+                if self.log_counter % 25 == 0:
                     self.get_logger().info("无新目标，使用上次记录位置")
                 self.fly_to_position(self.last_found_x_NED, self.last_found_y_NED, self.last_found_z_NED)
             else:
-                if self.log_counter % 30 == 0:
+                if self.log_counter % 25 == 0:
                     self.get_logger().info("无目标记录，原地等待")
                 self.fly_to_position(self.vehicle_local_position.x, self.vehicle_local_position.y, self.takeoff_target_height)
     
@@ -1178,14 +1238,14 @@ class OffboardControl(Node):
                     self.get_logger().info(f"起飞基准高度: {self.initial_z:.2f} m, 目标起飞高度: {self.takeoff_target_height:.2f} m")
 
             if self.is_ReadyToTakeoff and not self.is_AtTakeoffHeight:
-                if self.log_counter % 10 == 0:
+                if self.log_counter % 25 == 0:
                     self.get_logger().info("执行步骤2,上升到指定高度")
                 self.takeoff_relative()
                 self.takeoff_height_check()
                 # self.is_AtTakeoffHeight = False#  测试用
 
             if self.is_AtTakeoffHeight and not self.is_AtDropArea:
-                if self.log_counter % 10 == 0:
+                if self.log_counter % 25 == 0:
                     self.get_logger().info("执行步骤3,飞向投水区")
                 if not self.is_drop_area_calculated:
                     self.get_logger().info("执行步骤3, 计算投水区位置并开始导航...")
@@ -1209,10 +1269,9 @@ class OffboardControl(Node):
                 
                 elapsed_drop_time = (self.get_clock().now() - self.drop_phase_start_time).nanoseconds / 1e9
                 if elapsed_drop_time > self.drop_phase_timeout:
-                    self.get_logger().warn(f"投放阶段整体超时（超过 {self.drop_phase_timeout} 秒），进入强制投放流程。")
+                    # self.get_logger().warn(f"投放阶段整体超时（超过 {self.drop_phase_timeout} 秒），进入强制投放流程。")
                     # <<< 修改：不再直接投放，而是切换到专用状态 >>>
                     self.mission_state = MissionState.TIMEOUT_DROP
-                    return # 立刻返回，让下一个循环处理新状态
                 #======启动投放区域计时模块========
                 
                 ## 进入全局搜索模块
@@ -1348,9 +1407,9 @@ class OffboardControl(Node):
 
 
                 elif self.mission_state == MissionState.TIMEOUT_DROP:
-                    self.get_logger().info("正在执行超时强制投放流程...")
+                    # self.get_logger().info("正在执行超时强制投放流程...")
                     if not self.Is_Finish_1st_Drop and self.current_dropping_state[1] == DroppingState.IDLE:
-                        self.get_logger().info("强制启动第一个载荷的投放序列。")
+                        self.get_logger().warn("强制启动第一个载荷的投放序列。")
                         self.drop_payload(1)
                         self.timeout_drop_start_time = self.get_clock().now()
 
@@ -1363,8 +1422,10 @@ class OffboardControl(Node):
                         else:
                             elapsed_time = (self.get_clock().now() - self.timeout_drop_start_time).nanoseconds / 1e9
                             if elapsed_time > self.timeout_drop_delay:
-                                self.get_logger().info("强制启动第二个载荷的投放序列。")
+                                self.get_logger().warn("强制启动第二个载荷的投放序列。")
                                 self.drop_payload(2)
+                            else:
+                                return
 
                     # 3. 检查是否全部投放完毕
                     if self.Is_Finish_1st_Drop and self.Is_Finish_2nd_Drop:
@@ -1395,7 +1456,7 @@ class OffboardControl(Node):
                 cv2.imshow("Drone View", self.latest_annotated_frame)
                 cv2.waitKey(1)
         elasped_timer_time = (self.get_clock().now() - timer_start).nanoseconds / 1e9
-        if self.offboard_setpoint_counter % 50 == 0:
+        if self.offboard_setpoint_counter % 150 == 0:
             self.get_logger().info(f"控制循环花费时间：{elasped_timer_time:.5f}s")
         
     def vision_timer_callback(self):
@@ -1427,7 +1488,7 @@ class OffboardControl(Node):
             self.latest_annotated_frame = frame_to_process
 
         elasped_timer_time = (self.get_clock().now() - timer_start).nanoseconds / 1e9
-        if self.offboard_setpoint_counter % 50 ==0:
+        if self.offboard_setpoint_counter % 150 == 0:
             self.get_logger().info(f"视觉循环花费时间：{elasped_timer_time:.5f}")
 
 
@@ -1492,13 +1553,8 @@ def main(args=None) -> None:
                         help='深度相机的y方向误差.')
     
     
-    parser.add_argument('--trigger-distance', type=float, default=32.5,
-                    help='切换到offboard的触发距离.')
-    parser.add_argument('--position-threshold', type=float, default=0.5,
-                    help='触发距离的阈值.')
-    
      # --- 定时器参数 ---
-    parser.add_argument('--timer-period', type=float, default=0.04,
+    parser.add_argument('--timer-period', type=float, default=0.03,
                         help='定时器周期 (秒), 这也决定了PID控制中的 dt。默认: 0.03s (约33Hz).')
     parser.add_argument('--vision-timer-period', type=float, default=0.1,
                         help='定时器周期 (秒), 默认: 0.1s (10Hz).')
@@ -1533,7 +1589,8 @@ def main(args=None) -> None:
                         help='判断无人机到达导航点（如投水区）的误差阈值（米）。')
     parser.add_argument('--target-approach-threshold', type=float, default=0.3,
                         help='判断无人机飞到目标上方，可以开始精确对准的误差阈值（米）。')
-    
+    parser.add_argument('--alignment-altitude-threshold', type=float, default=0.5,
+                        help='在检查X/Y对准前，无人机必须达到的高度误差阈值（米）。')
     parser.add_argument('--headless', action='store_true',
                         help='以无头模式运行，不显示摄像头的GUI窗口。')
     

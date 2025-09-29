@@ -250,8 +250,6 @@ class OffboardControl(Node):
         self.second_align_maxtime = args.second_align_maxtime
         self.first_align_maxtime = args.first_align_maxtime
 
-        self.trigger_distance = args.trigger_distance
-        self.position_threshold = args.position_threshold
         self.alignment_altitude_threshold = args.alignment_altitude_threshold
 
 
@@ -1787,18 +1785,18 @@ def main(args=None) -> None:
                         help='Time window (seconds) to maintain stability for the first alignment.')
     parser.add_argument('--first-align-check-freq', type=int, default=5,
                         help='Check frequency (how many timer calls per check) for the first alignment.')
-    parser.add_argument('--second-align-threshold', type=float, default=0.003,
+    parser.add_argument('--second-align-threshold', type=float, default=0.10,
                         help='Threshold (distance in meters) for the second alignment.')
     parser.add_argument('--second-align-time-window', type=float, default=3.0,
                         help='Time window (seconds) to maintain stability for the second alignment.')
     parser.add_argument('--second-align-check-freq', type=int, default=5,
                         help='Check frequency (how many timer calls per check) for the second alignment.')    
     
-    parser.add_argument('--drop-phase-timeout', type=float, default=8000,
+    parser.add_argument('--drop-phase-timeout', type=float, default=80,
                         help='Maximum time in seconds for the entire dropping phase.')
     parser.add_argument('--search-timeout', type=float, default=5.0,
                         help='Maximum time in seconds for each search attempt.')
-    parser.add_argument('--second-align-maxtime', type=float, default=1000,
+    parser.add_argument('--second-align-maxtime', type=float, default=15,
                         help='Maximum time in seconds for each search attempt.')
     parser.add_argument('--first-align-maxtime', type=float, default=5, 
                         help='Maximum time in seconds for the first alignment phase before forcing a drop.')
@@ -1809,11 +1807,6 @@ def main(args=None) -> None:
     parser.add_argument('--depthcam_yoffset', type=float, default=0.033,
                         help='深度相机的y方向误差.')
     
-    
-    parser.add_argument('--trigger-distance', type=float, default=32.5,
-                    help='切换到offboard的触发距离.')
-    parser.add_argument('--position-threshold', type=float, default=0.5,
-                    help='触发距离的阈值.')
     
      # --- 定时器参数 ---
     parser.add_argument('--timer-period', type=float, default=0.03,
@@ -1851,7 +1844,7 @@ def main(args=None) -> None:
                         help='判断无人机到达导航点（如投水区）的误差阈值（米）。')
     parser.add_argument('--target-approach-threshold', type=float, default=0.3,
                         help='判断无人机飞到目标上方，可以开始精确对准的误差阈值（米）。')
-    parser.add_argument('--alignment-altitude-threshold', type=float, default=0.2,
+    parser.add_argument('--alignment-altitude-threshold', type=float, default=0.5,
                         help='在检查X/Y对准前，无人机必须达到的高度误差阈值（米）。')
     parser.add_argument('--headless', action='store_true',
                         help='以无头模式运行，不显示摄像头的GUI窗口。')
