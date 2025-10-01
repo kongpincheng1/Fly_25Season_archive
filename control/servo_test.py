@@ -67,7 +67,7 @@ class ServoTester:
             if drop_number == 1 :
                 self.servo_control.open_servo(0.0, 1.0)
             elif drop_number ==2 :
-                self.servo_control.open_servo(0.0, -1.0)
+                self.servo_control.open_servo(-1.0, 1.0)
             self.current_dropping_state[drop_number] = DroppingState.STEP_1_COMMANDED
             self.last_servo_command_time[drop_number] = self.clock.now()
 
@@ -98,7 +98,7 @@ class ServoTester:
                 self.servo_control.open_servo(0.0, 1.0)
                 self.logger.info(f"第 {drop_number} 次投水 - 步骤 2: (0, 1)")
             elif drop_number ==2:
-                self.servo_control.open_servo(0.0, -1.0)
+                self.servo_control.open_servo(-1.0, 1.0)
                 self.logger.info(f"第 {drop_number} 次投水 - 步骤 2: (0, 1)")
             self.current_dropping_state[drop_number] = DroppingState.STEP_2_COMMANDED
             self.last_servo_command_time[drop_number] = self.clock.now()
@@ -114,7 +114,7 @@ class ServoTester:
                 self.servo_control.open_servo(1.0, 0.0)
                 self.logger.info(f"第 {drop_number} 次投水 - 步骤 2: (0, 1)")
             elif drop_number ==2:
-                self.servo_control.open_servo(-1.0, 0.0)
+                self.servo_control.open_servo(-1.0, 1.0)
                 self.logger.info(f"第 {drop_number} 次投水 - 步骤 2: (0, 1)")
             
             self.current_dropping_state[drop_number] = DroppingState.STEP_4_COMMANDED

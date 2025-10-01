@@ -537,7 +537,7 @@ class OffboardControl(Node):
             if drop_number == 1 :
                 self.servo_control.open_servo(0.0, 1.0)
             elif drop_number ==2 :
-                self.servo_control.open_servo(0.0, -1.0)
+                self.servo_control.open_servo(-1.0, 1.0)
             self.current_dropping_state[drop_number] = DroppingState.STEP_1_COMMANDED
             # 使用ROS 2的时钟
             self.last_servo_command_time[drop_number] = self.get_clock().now()
@@ -565,7 +565,7 @@ class OffboardControl(Node):
             if drop_number == 1:
                 self.servo_control.open_servo(0.0, 1.0)
             else: # drop_number == 2
-                self.servo_control.open_servo(0.0, -1.0)
+                self.servo_control.open_servo(-1.0, 1.0)
             self.current_dropping_state[drop_number] = DroppingState.STEP_2_COMMANDED
             self.last_servo_command_time[drop_number] = self.get_clock().now()
         
@@ -578,7 +578,7 @@ class OffboardControl(Node):
             if drop_number == 1:
                 self.servo_control.open_servo(1.0, 0.0)
             else: # drop_number == 2
-                self.servo_control.open_servo(-1.0, 0.0)
+                self.servo_control.open_servo(-1.0, 1.0)
             self.current_dropping_state[drop_number] = DroppingState.STEP_4_COMMANDED
             self.last_servo_command_time[drop_number] = self.get_clock().now()
             
