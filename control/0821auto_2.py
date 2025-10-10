@@ -281,6 +281,8 @@ class OffboardControl(Node):
 
         self.first_alignment_complete = False
         self.second_alignment_complete = False
+        self.return_to_recon_center = False
+        self.reach_initial_position_above = False
 
         self.Is_Finish_1st_Drop = False
         self.Is_Finish_2nd_Drop = False
@@ -1283,7 +1285,10 @@ class OffboardControl(Node):
                 if self.initPositionChecker.is_stable():
                     self.is_ReadyToTakeoff = True
                     self.arm()
+                    self.initial_x = self.vehicle_local_position.x
+                    self.initial_y = self.vehicle_local_position.y
                     self.initial_z = self.vehicle_local_position.z
+                    self.init_yaw = self.vehicle_local_position.heading
                     self.takeoff_target_height = float(self.initial_z + self.takeoff_height)
                     self.get_logger().info(f"起飞基准高度: {self.initial_z:.2f} m, 目标起飞高度: {self.takeoff_target_height:.2f} m")
 
@@ -1626,8 +1631,24 @@ class OffboardControl(Node):
 
                 # 状态：MISSION_COMPLETE
                 elif self.mission_state == MissionState.MISSION_COMPLETE:
-                    self.get_logger().info("所有任务阶段均已完成，RTL。")
-                    self.return_to_launch()
+
+
+                    if not self.return_to_recon_center:
+                        target_recon_x_frd = self.forward_x + self.recon_forward_distance # 向前飞
+                        target_recon_y_frd = 0 # 侧向不变
+                        # 将目标FRD坐标转换为全局NED坐标
+                        target_recon_x_ned, target_recon_y_ned = self.coordinate_FRD2NED(
+                            target_recon_x_frd,
+                            target_recon_y_frd
+                        )
+                        self.fly_to_position(target_recon_x_ned,target_recon_y_ned,self.takeoff_target_height)
+                        dist_err = math.hypot(self.vehicle_local_position.x - target_recon_x_ned, self.vehicle_local_position.y - target_recon_y_ned)
+                        if dist_err < self.recon_nav_threshold:
+                            self.return_to_recon_center = True
+                            self.get_logger().info("已经回到侦察区域中心")
+                    else:
+                        self.return_to_launch()
+                        self.get_logger().info("所有任务阶段均已完成，RTL。")
 
         else:
             # 只有在过了初始的切换阶段后才打印日志，避免启动时的干扰
@@ -1781,7 +1802,7 @@ def main(args=None) -> None:
                         help='在超时强制投放流程中，两次投放之间的最小间隔（秒）。')
     parser.add_argument('--servo-step-delay', type=float, default=0.1,
                         help='舵机每个动作之间的延迟时间（秒）。')
-    
+
     parser.add_argument('--takeoff-threshold', type=float, default=0.22,
                         help='判断无人机到达起飞高度的误差阈值（米）。')
     parser.add_argument('--nav-threshold', type=float, default=0.2,
@@ -1792,19 +1813,19 @@ def main(args=None) -> None:
                         help='在检查X/Y对准前，无人机必须达到的高度误差阈值（米）。')
     parser.add_argument('--headless', action='store_true',
                         help='以无头模式运行，不显示摄像头的GUI窗口。')
-    
+
     # <<< 新增：用于控制视频录制的参数 >>>
     parser.add_argument('--record-video', action='store_true',
                         help='启用任务视频录制功能。')
-    
-    # --- 选择投放桶 --- 
-    parser.add_argument('--target-order', 
+
+    # --- 选择投放桶 ---
+    parser.add_argument('--target-order',
                         type=int,  # 关键：将类型改为整数
                         nargs='+', # 接收一个或多个值
                         default=[1, 3, 2], # 默认顺序: 中(2), 左(1), 右(3)
                         help='设置目标的投放顺序。使用数字: 1=左, 2=中, 3=右。 '
                              '例如: --target-order 3 1 2')
-    
+
     # === 新增：为侦察任务添加参数 ===
     parser.add_argument('--recon-search-height', type=float, default=-5.0,
                         help='执行第二次（侦察）视觉搜索时的高度（米）。')
@@ -1814,11 +1835,11 @@ def main(args=None) -> None:
                         help='到达每个侦察圆筒上方后的悬停侦察时间（秒）。')
     parser.add_argument('--recon-nav-threshold', type=float, default=0.5,
                         help='判断无人机到达侦察点的误差阈值（米）。')
-    
+
     parser.add_argument('--recon-forward-distance', type=float, default=2.0,
                         help='投水完成后，在Offboard模式下向前飞行以到达侦察区的距离（米）。')
-    
-    
+
+
     # <<< 新增：动态平滑移动的参数 >>>
     parser.add_argument('--smoothing-speed', type=float, default=1.5,
                         help='Average speed (m/s) for smooth transitions between targets.')
@@ -1826,7 +1847,7 @@ def main(args=None) -> None:
                         help='Minimum duration (seconds) for any smooth move to ensure stability.')
     parser.add_argument('--max-smoothing-duration', type=float, default=8.0,
                         help='Maximum duration (seconds) for any smooth move to cap long-distance travel time.')
-    
+
     # 3. 解析参数
     # 使用 rclpy.utilities.remove_ros_args 来确保我们只解析自己的参数，
     # 这样可以安全地与 ROS2 的参数（如 --ros-args）一起使用。
@@ -1863,7 +1884,7 @@ def main(args=None) -> None:
 
     # 关键：用翻译好的字符串列表，覆盖掉原来的数字列表
     custom_args.target_order = translated_order_strings
-    
+
     # =================================================================
     # ##########################################################################
     # ################          新增的任务参数总览打印模块          ################
@@ -1889,9 +1910,9 @@ def main(args=None) -> None:
     print(f"  - 无头模式 (不显示GUI): {'是' if custom_args.headless else '否'}")
     print("==================================================\n")
     # ##########################################################################
-    
+
     print('Starting offboard control node with custom parameters...')
-    
+
     # 4. 将解析后的参数传入节点
     offboard_control = OffboardControl(args=custom_args)
 
