@@ -20,13 +20,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'fly = control.latest_single_drop:main',
-            'pub = control.sim_pub:main',
-            'mul = control.test_mulitiDrop:main',
             'test = control.sim.0809_sim_mono:main',
-            '0821 = control.0821:main',
-            '0821auto = control.0821auto:main',
-            'servo = control.servo_test:main',
         ],
     },
 )

@@ -300,6 +300,8 @@ class OffboardControl(Node):
 
         self.first_alignment_complete = False
         self.second_alignment_complete = False
+        self.return_to_recon_center = False
+        self.reach_initial_position_above = False
 
         self.Is_Finish_1st_Drop = False
         self.Is_Finish_2nd_Drop = False
@@ -1339,7 +1341,10 @@ class OffboardControl(Node):
                 if self.initPositionChecker.is_stable():
                     self.is_ReadyToTakeoff = True
                     self.arm()
+                    self.initial_x = self.vehicle_local_position.x
+                    self.initial_y = self.vehicle_local_position.y
                     self.initial_z = self.vehicle_local_position.z
+                    self.init_yaw = self.vehicle_local_position.heading
                     self.takeoff_target_height = float(self.initial_z + self.takeoff_height)
                     self.get_logger().info(f"起飞基准高度: {self.initial_z:.2f} m, 目标起飞高度: {self.takeoff_target_height:.2f} m")
 
@@ -1682,8 +1687,24 @@ class OffboardControl(Node):
 
                 # 状态：MISSION_COMPLETE
                 elif self.mission_state == MissionState.MISSION_COMPLETE:
-                    self.get_logger().info("所有任务阶段均已完成，RTL。")
-                    self.return_to_launch()
+                    
+                    
+                    if not self.return_to_recon_center:
+                        target_recon_x_frd = self.forward_x + self.recon_forward_distance # 向前飞
+                        target_recon_y_frd = 0 # 侧向不变
+                        # 将目标FRD坐标转换为全局NED坐标
+                        target_recon_x_ned, target_recon_y_ned = self.coordinate_FRD2NED(
+                            target_recon_x_frd,
+                            target_recon_y_frd
+                        )
+                        self.fly_to_position(target_recon_x_ned,target_recon_y_ned,self.takeoff_target_height)
+                        dist_err = math.hypot(self.vehicle_local_position.x - target_recon_x_ned, self.vehicle_local_position.y - target_recon_y_ned)
+                        if dist_err < self.recon_nav_threshold:
+                            self.return_to_recon_center = True
+                            self.get_logger().info("已经回到侦察区域中心")
+                    else:
+                        self.return_to_launch()
+                        self.get_logger().info("所有任务阶段均已完成，RTL。")
         
         else:
             # 只有在过了初始的切换阶段后才打印日志，避免启动时的干扰
