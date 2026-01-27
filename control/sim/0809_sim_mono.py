@@ -25,6 +25,8 @@ from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from rclpy.qos import qos_profile_sensor_data
+from ament_index_python.packages import get_package_share_directory
+
 
 class DroppingState(Enum):
     IDLE = 0
@@ -322,7 +324,7 @@ class OffboardControl(Node):
 
         # ========== 目标像素坐标日志 ==========
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        log_dir = '/home/kpc/flylogs'
+        log_dir = '~/flylogs'
         log_filename = f'bucket_pixel_log_{timestamp}.csv'
         os.makedirs(log_dir, exist_ok=True)
         self.pixel_log_path = os.path.join(log_dir, log_filename)
@@ -1774,13 +1776,32 @@ def main(args=None) -> None:
 
     # 2. 设置我们自己的命令行参数解析器
     parser = argparse.ArgumentParser(description="Offboard control script for PX4 drone mission.")
+
+    pkg_name = 'control'  # 替换的包名
+        
+    try:
+        pkg_share_dir = get_package_share_directory(pkg_name)
+        
+        # 假设你的pt文件在包的根目录
+        default_weights_path = os.path.join(pkg_share_dir, 'models', 'best_sim.pt')
+        
+        # 检查文件是否存在，不存在则使用备用路径
+        if not os.path.exists(default_weights_path):
+            self.get_logger().warn(f"Default weights file not found at {default_weights_path}")
+            # 可以设置为空字符串或其他默认值
+            default_weights_path = ""
+            
+    except PackageNotFoundError:
+        self.get_logger().error(f"Package {pkg_name} not found")
+        default_weights_path = ""
+
     
     # 添加你想通过命令行配置的参数
-    parser.add_argument('--model-path', type=str, default='/home/kpc/weights/best_sim.pt',
+    parser.add_argument('--model-path', type=str, default=default_weights_path,
                         help='Path to the object detection model file.')
-    parser.add_argument('--photo-path', type=str, default='/home/kpc/image_recodes',
+    parser.add_argument('--photo-path', type=str, default='~/image_recodes',
                         help='Base directory to save captured photos.')
-    parser.add_argument('--video-path', type=str, default='/home/video_recodes',
+    parser.add_argument('--video-path', type=str, default='~/video_recodes',
                         help='Base directory to save recorded mission videos.')
     parser.add_argument('--camera-hint', type=str, default='imx577',
                         help='Hint to find the camera device name (e.g., "USB", "C920").')
